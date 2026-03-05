@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 import torchinfo
 import wandb
+
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -22,9 +23,8 @@ from smolcluster.utils.common_utils import (
     set_gradients,
     set_weights_by_layer,
 )
-from smolcluster.utils.layers import get_hfmodel_per_node, get_model_per_node
+from smolcluster.utils.layers import get_model_per_node
 from smolcluster.utils.logging_utils import setup_cluster_logging
-
 
 step = 0  # Global step counter to track training progress across threads
 
@@ -347,7 +347,7 @@ def run_fsdp_worker(
     staleness_bound = cluster_config.get("staleness_bound", 0)  # 0 = strict sync, >0 = bounded async
     cluster_config["num_workers"]
     NUM_WORKERS = cluster_config["num_workers"]
-    
+
     if staleness_bound > 0:
         logger.info(f"Bounded staleness enabled: staleness_bound={staleness_bound}")
     else:
@@ -623,15 +623,17 @@ def run_fsdp_worker(
             logger.info(
                 f"[Step {step}/{num_epochs * len(train_loader)}] Worker rank {worker_rank} computing local gradients"
             )
+            #ZeRO Stage 1 optimization: Only compute gradients for this worker's owned layers
 
             local_loss, local_grads = compute_leader_gradients(
-                device, model, data, target, criterion, optimizer, config
+                device, sharded_model, data, target, criterion, optimizer, config
             )
             with lock:
                 grads_received[step][worker_rank] = local_grads
 
             total_loss += local_loss.item()
 
+            #ZeRO Stage 2 optimization: Only split and communicate gradients for parameters this worker owns/updated
             total_params = sum(p.numel() for p in model.parameters())
             grads_indices = torch.arange(total_params)
             split_indices = torch.chunk(grads_indices, num_nodes)

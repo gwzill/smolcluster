@@ -426,7 +426,7 @@ def run_fsdp_worker(
     model = model.to(device)
     logger.info(f"Model initialized on device: {device}")
     
-    sharded_model, out_layers  = get_model_per_node(
+    _, out_layers  = get_model_per_node(
         model=model,
         num_nodes=num_nodes,
         local_rank=worker_rank,
