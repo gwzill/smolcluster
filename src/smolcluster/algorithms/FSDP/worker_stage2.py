@@ -6,7 +6,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-
+from typing import Any
 import torch
 import torchinfo
 import wandb
@@ -30,18 +30,35 @@ step = 0  # Global step counter to track training progress across threads
 
 
 def combine(
-    grads_dict: dict[int, dict[str, torch.Tensor]]
-) -> dict[str, torch.Tensor]:
-    """Average gradients from all workers."""
-    grads_reduced = {}
-    for worker_id in list(grads_dict):
-        for name, worker_grads in grads_dict[worker_id].items():
-            grads_reduced[name] = grads_reduced.get(name, 0.0) + (
-                worker_grads 
-            )
+    data: Any, type: str = "gradients"
+) -> dict[str, torch.Tensor] | None:
+    """Conbining data from all workers."""
+    
+    if type == "gradients":
+        
+        logger.info(f"Averaging gradients from {len(data)} workers")
+        grads_reduced = {}
+        for worker_id in list(data):
+            for name, worker_grads in data[worker_id].items():
+                grads_reduced[name] = grads_reduced.get(name, 0.0) + (
+                    worker_grads 
+                )
+        return grads_reduced
 
-    return grads_reduced
-
+    elif type == "parameters":
+        logger.info(f"combining parameters from {len(data)} workers")
+        params_reduced = {}
+        for worker_id in list(data):
+            for name, worker_params in data[worker_id].items():
+                params_reduced[name] = params_reduced.get(name, 0.0) + (
+                    worker_params 
+                )
+   
+        return params_reduced
+    
+    else:
+        logger.error(f"Unknown data type for combine: {type}")
+        return None
 
 def compute_leader_activations(
     device: torch.device,
@@ -167,9 +184,8 @@ logger = None  # Will be set in run_modelparallelism_pipeline_worker
 def handle_worker(
     conn: socket.socket,
     addr: tuple[str, int],
-    workers: dict,
     grads_received: dict,
-    reduced_grads_received: dict,
+    parameters_received: dict,
     step_event: threading.Event,
     lock: threading.Lock,
     weights_received: dict,
@@ -189,20 +205,28 @@ def handle_worker(
 
             logger.debug(len(message))
 
-            command, recv_step, rank, data = message
+            command, recv_step, rank, data, type = message
 
             if command == "all_reduce":
+                
                 logger.info(
                     f"Received message '{command}' from worker {addr} (rank {rank}) for step {recv_step}"
                 )
                 logger.info(f"[Step {recv_step}] Storing gradients from worker {rank}")
 
-                with lock:
-                    grads_received[recv_step][rank] = data
-                    logger.info(
-                        f"[Step {recv_step}] Now have {len(grads_received[recv_step])} gradient sets"
-                    )
-
+                if type == "gradients":
+                    with lock:
+                        grads_received[recv_step][rank] = data
+                        logger.info(
+                            f"[Step {recv_step}] Now have {len(grads_received[recv_step])} gradient sets"
+                        )
+                elif type == "parameters":
+                    with lock:
+                        parameters_received[recv_step][rank] = data
+                        logger.info(
+                            f"[Step {recv_step}] Now have {len(parameters_received[recv_step])} parameter sets"
+                        )
+                    
                 # reduced_grads = reduce(grads_received[recv_step], len(grads_received[recv_step]))
                 step_event.set()
 
@@ -237,10 +261,9 @@ def accept_workers(
     sock: socket.socket,
     NUM_WORKERS: int,
     workers: dict,
-    model_name: str,
     grads_received: dict,
-    reduced_grads_received: dict,
     weights_received: dict,
+    parameters_received: dict,
     step_event: threading.Event,
     lock: threading.Lock,
 ) -> None:
@@ -271,12 +294,12 @@ def accept_workers(
                     args=(
                         client_socket,
                         client_address,
-                        workers,
                         grads_received,
-                        reduced_grads_received,
+                        parameters_received,
                         step_event,
                         lock,
                         weights_received,
+                        
                     ),
                     daemon=True,
                 ).start()
@@ -390,6 +413,7 @@ def run_fsdp_worker(
     grads_received = defaultdict(dict)
     reduced_grads_received = defaultdict(dict)  # Buffer for scatter-reduce gradients
     weights_received = defaultdict(dict)  # Buffer for broadcast weights
+    parameters_received = defaultdict(dict)  # Buffer for all-gathered parameters
     num_nodes = cluster_config["num_nodes"]
     num_layers = cluster_config["num_layers"]
     
@@ -400,6 +424,7 @@ def run_fsdp_worker(
         "max_step_diff": 0,  # Maximum step difference observed
         "broadcast_weights_step_diffs": [],  # Track step differences for broadcast weights
         "stale_weight_count": 0,  # Count of weights with step_diff > 0
+        "stale_parameter_count": 0,  # Count of parameters with step_diff > 0 (added for parameter staleness tracking)
     }
 
     # Gradient clipping
@@ -412,7 +437,7 @@ def run_fsdp_worker(
     model = model.to(device)
     logger.info(f"Model initialized on device: {device}")
     
-    sharded_model, out_layers  = get_model_per_node(
+    _, out_layers  = get_model_per_node(
         model=model,
         num_nodes=num_nodes,
         local_rank=worker_rank,
@@ -420,8 +445,17 @@ def run_fsdp_worker(
             
     )
 
+    #ZeRO Stage 3: Divide the model layers across workers and only keep the local layers on each worker to reduce memory and communication overhead. Each worker will only update its local layers and communicate those updates.
+    
+    
     model_layers = out_layers
     
+    total_params = sum(p.numel() for p in model.parameters())
+    parameter_indices = torch.arange(total_params)
+    split_indices = torch.chunk(parameter_indices, num_nodes)
+    
+    sharded_out_layers = out_layers[split_indices]
+    sharded_model = torch.nn.ModuleList(list(sharded_out_layers.values()))
     # print(out_layers)
     logger.info(f"Worker rank {worker_rank} loaded {len(model_layers)} layers")
     # print(sharded_model)
@@ -571,10 +605,9 @@ def run_fsdp_worker(
         sock,
         NUM_WORKERS,
         workers=workers,
-        model_name="",
         grads_received=grads_received,
-        reduced_grads_received=reduced_grads_received,
         weights_received=weights_received,
+        parameters_received=parameters_received,
         step_event=step_event,
         lock=lock
     )
@@ -619,10 +652,109 @@ def run_fsdp_worker(
 
             activations = None
 
+            #Gathering all the model parameters
+            
+            # All-gather: send local parameters to all peers via outbound connections
+            logger.info(
+                "Performing all-gather: broadcasting local parameters to all peers"
+            )
+
+            for peer_rank, peer_socket in outbound_worker_sockets.items():
+                
+                params_split = {}
+                for i, (name, param) in enumerate(sharded_out_layers.items()):
+                    
+                    if i in split_indices[peer_rank % len(split_indices)]:
+                        params_split[name] = param.data.cpu().clone()  # Move to CPU and clone for network transmission
+                        
+                    
+                send_message(
+                    peer_socket,
+                    (
+                        "all_reduce",
+                        step,
+                        worker_rank,
+                        params_split,
+                        'parameters',
+                    ),
+                )
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} sent parameters to worker {peer_rank}"
+                )
+            # Wait for all workers (all gather) to send their parameters for this step
+            # Check for staleness violations and clean up stale parameters (only if staleness_bound > 0)
+
+            while True:
+                with lock:
+                    # Only check staleness if bounded async is enabled
+                    if staleness_bound > 0:
+                        for recv_step in list(parameters_received.keys()):
+                            step_diff = abs(recv_step - step)
+                            
+                            # Track staleness statistics
+                            staleness_stats["all_reduce_step_diffs"].append(step_diff)
+                            staleness_stats["max_step_diff"] = max(
+                                staleness_stats["max_step_diff"], step_diff
+                            )
+                            if step_diff > 0:
+                                staleness_stats["stale_parameter_count"] += 1
+                            
+                            if step_diff > staleness_bound:
+                                logger.error(
+                                    f"[Step {step}] STALENESS VIOLATION: Received parameter from step {recv_step} "
+                                    f"(diff={step_diff} > bound={staleness_bound}). Training stopped."
+                                )
+                                raise RuntimeError(
+                                    f"Staleness bound violated: step difference {step_diff} exceeds bound {staleness_bound}"
+                                )
+                    
+                    curr_workers_len = len(parameters_received[step])
+
+                logger.info(
+                    f"Worker {worker_rank} - Epoch {epoch + 1}/{num_epochs}, Step {step}/{num_epochs * len(train_loader)}: Received parameters from {curr_workers_len}/{NUM_WORKERS} workers."
+                )
+                if curr_workers_len < NUM_WORKERS:
+                    logger.info(f"Waiting for more parameters for step {step}...")
+                    step_event.wait(timeout=1.0)
+                    step_event.clear()
+                else:
+                    break
+
+            
+            logger.info(
+                f"[Step {step}] Worker {worker_rank} received all parameters from peers, now updating local model parameters with all-gathered parameters"
+            )
+            
+            # Average gradients and update model
+            if len(parameters_received[step]) != 0:
+                logger.info(
+                    f"[Step {step}  / {num_epochs * len(train_loader)}] Combining parameters from {len(parameters_received[step])} participants"
+                )
+
+                # combine the params
+                params_reduced = combine(parameters_received[step], type="parameters")
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} combined parameters successfully"
+                )
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} applying combined parameters to local model"
+                )
+
+                set_weights_by_layer(params_reduced[step], model, worker_rank)
+
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} model updated with averaged parameters"
+                )
+                
+                
             # Each worker computes its own gradients on its local data
             logger.info(
                 f"[Step {step}/{num_epochs * len(train_loader)}] Worker rank {worker_rank} computing local gradients"
             )
+            
             #ZeRO Stage 1 optimization: Only compute gradients for this worker's owned layers
 
             local_loss, local_grads = compute_leader_gradients(
@@ -684,6 +816,7 @@ def run_fsdp_worker(
                         step,
                         worker_rank,
                         grads_split,
+                        'gradients',
                     ),
                 )
                 logger.info(
@@ -735,7 +868,7 @@ def run_fsdp_worker(
                 )
 
                 # combine the grads
-                grads_reduced = combine(grads_received[step])
+                grads_reduced = combine(grads_received[step], type='gradients')
 
                 logger.info(
                     f"[Step {step}] Worker {worker_rank} averaged gradients successfully"
@@ -774,6 +907,7 @@ def run_fsdp_worker(
                             step,
                             worker_rank,
                             owned_state_dict,
+                            
                         ),
                     )
                     logger.info(

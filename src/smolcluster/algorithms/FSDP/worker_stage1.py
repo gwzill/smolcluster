@@ -38,7 +38,7 @@ def combine(
         for name, worker_grads in grads_dict[worker_id].items():
             grads_reduced[name] = grads_reduced.get(name, 0.0) + (
                 worker_grads 
-            )
+            ) 
 
     return grads_reduced
 

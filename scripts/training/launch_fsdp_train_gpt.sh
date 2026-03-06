@@ -82,29 +82,16 @@ done
 
 # Read FSDP stage from config
 FSDP_STAGE=$(yq '.fsdp_stage // 1' "$CONFIG_FILE")
-FSDP_STAGE_NAME="All-Reduce"
+FSDP_STAGE_NAME="ZeRO Stage 0 (Optimizer Partitioning)"
 if [[ $FSDP_STAGE -eq 1 ]]; then
-    FSDP_STAGE_NAME="ZeRO Stage 1 (Optimizer Partitioning)"
+    FSDP_STAGE_NAME="ZeRO Stage 1 (Optimizer Partitioning + Gradient Partitioning)"
+elif [[ $FSDP_STAGE -eq 2 ]]; then
+    FSDP_STAGE_NAME="ZeRO Stage 2 (Optimizer + Gradient + Parameter Partitioning)"
 fi
 
 echo "🚀 SmolCluster Launch Script - FSDP Stage $FSDP_STAGE ($FSDP_STAGE_NAME)"
 echo "📁 Project dir: $PROJECT_DIR"
 echo "⚙️  Config file: $CONFIG_FILE"
-
-# Verify the API key works by setting it as env var and testing
-export WANDB_API_KEY
-
-if WANDB_API_KEY="$WANDB_API_KEY" wandb login --relogin <<< "$WANDB_API_KEY" 2>&1 | grep -qE "(Successfully logged in|Logged in)"; then
-    echo "✅ wandb authentication successful"
-else
-    # Try alternative: just verify the key is valid format (40 hex chars typically)
-    if [[ ${#WANDB_API_KEY} -ge 32 ]]; then
-        echo "✅ API key accepted (will be set as WANDB_API_KEY on all nodes)"
-    else
-        echo "❌ Invalid API key format. Please check your API key."
-        exit 1
-    fi
-fi
 
 echo "📤 This API key will be used on all remote nodes"
 

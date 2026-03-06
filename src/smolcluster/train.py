@@ -37,6 +37,7 @@ from smolcluster.algorithms.DataParallelism.SynchronousPS.server import run_sync
 from smolcluster.algorithms.DataParallelism.SynchronousPS.worker import run_syncps_worker
 from smolcluster.algorithms.FSDP.worker_stage0 import run_fsdp_worker as run_fsdp_worker_stage0
 from smolcluster.algorithms.FSDP.worker_stage1 import run_fsdp_worker as run_fsdp_worker_stage1
+from smolcluster.algorithms.FSDP.worker_stage2 import run_fsdp_worker as run_fsdp_worker_stage2
 from smolcluster.data.prepare_dataset import prepare_dataset
 from smolcluster.models.gpt import BaseTransformer
 from smolcluster.utils.device import get_device
@@ -461,7 +462,7 @@ def run_worker(
             resume_checkpoint_path=resume_checkpoint_path,
         )
     elif algorithm == 'fsdp':
-        # Select FSDP stage: 0 = all-reduce, 1 = ZeRO Stage 1
+        # Select FSDP stage: 0 = all-reduce, 1 = ZeRO Stage 1, 2 = ZeRO Stage 2
         fsdp_stage = cluster_config.get('fsdp_stage', 1)
         if fsdp_stage == 0:
             run_fsdp_worker_stage0(
@@ -493,8 +494,23 @@ def run_worker(
                 port=port,
                 resume_checkpoint_path=resume_checkpoint_path,
             )
+        elif fsdp_stage == 2:
+            run_fsdp_worker_stage2(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                config=gpt_config,
+                cluster_config=cluster_config,
+                worker_rank=local_rank,
+                hostname=hostname,
+                device=device,
+                criterion=criterion,
+                host_ip=host_ip,
+                port=port,
+                resume_checkpoint_path=resume_checkpoint_path,
+            )
         else:
-            raise ValueError(f"Invalid fsdp_stage: {fsdp_stage}. Must be 0 or 1.")
+            raise ValueError(f"Invalid fsdp_stage: {fsdp_stage}. Must be 0, 1, or 2.")
     wandb.finish()
 
 

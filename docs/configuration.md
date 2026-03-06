@@ -32,7 +32,7 @@ ZeRO-optimized data parallelism with configurable optimizer state partitioning, 
 
 ```yaml
 # FSDP stage selection
-fsdp_stage: 1                  # 0: All-Reduce, 1: ZeRO Stage 1 optimizer partitioning
+fsdp_stage: 1                  # 0: All-Reduce, 1: ZeRO Stage 1, 2: ZeRO Stage 2
 
 # Bounded staleness for gradient synchronization
 staleness_bound: 5             # Allow workers to be 5 steps apart (0 = strict sync)
@@ -81,7 +81,7 @@ seed: 42                       # Random seed
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `fsdp_stage` | int | ZeRO optimization stage: 0 (All-Reduce), 1 (Optimizer Partitioning) |
+| `fsdp_stage` | int | ZeRO optimization stage: 0 (All-Reduce), 1 (Optimizer Partitioning), 2 (Optimizer + Gradient Partitioning) |
 | `staleness_bound` | int | Maximum step difference (0 = strict sync, K = bounded async) |
 | `buffer_size` | dict | Network buffer sizes per device (MB) for optimized throughput |
 | `track_network_metrics` | bool | Enable bandwidth/latency tracking |
@@ -96,6 +96,7 @@ seed: 42                       # Random seed
 **FSDP Stage Details:**
 - **Stage 0 (All-Reduce)**: Classic data parallelism with full model replicas on each worker. All gradients averaged, all parameters synchronized.
 - **Stage 1 (ZeRO Optimizer Partitioning)**: Each worker owns subset of model layers and only updates those parameters. Memory savings: ~1/N optimizer states per worker. Bandwidth optimization: only owned parameters broadcasted.
+- **Stage 2 (ZeRO Optimizer + Gradient Partitioning)**: Extends Stage 1 by partitioning gradients during communication. Each worker only sends/receives gradient chunks it owns. Memory savings: ~1/N optimizer states + ~1/N gradients. Communication optimization: reduced all-reduce bandwidth.
 
 ### cluster_config_classicdp.yaml (Classic Data Parallelism)
 
