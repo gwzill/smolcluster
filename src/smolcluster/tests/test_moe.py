@@ -310,7 +310,7 @@ class TestMixtral:
         model.eval()
         
         with torch.no_grad():
-            output = model(sample_input, inference=True)
+            output = model(sample_input)
         
         batch_size, seq_len = sample_input.shape
         assert output.shape == (batch_size, seq_len, small_vocab_size)
@@ -353,7 +353,7 @@ class TestMixtral:
             dropout=0.0,
         )
         
-        output = model(sample_input, inference=True)
+        output = model(sample_input)
         loss = nn.functional.cross_entropy(
             output.view(-1, small_vocab_size),
             sample_labels.view(-1)
@@ -395,7 +395,7 @@ class TestMixtral:
             model.eval()
             
             with torch.no_grad():
-                output = model(sample_input, inference=True)
+                output = model(sample_input)
             
             assert output.shape[0] == sample_input.shape[0]
 
@@ -413,12 +413,11 @@ class TestMixtral:
             top_k=top_k_experts,
             max_seq_len=small_seq_len,
             device=device,
-            use_flash_attention=True,
         )
         model.eval()
         
         with torch.no_grad():
-            output = model(sample_input, inference=True)
+            output = model(sample_input)
         
         assert output.shape[2] == small_vocab_size
 
@@ -444,7 +443,7 @@ class TestMixtral:
         input_ids = torch.randint(0, small_vocab_size, (batch_size, short_seq))
         
         with torch.no_grad():
-            output = model(input_ids, inference=True)
+            output = model(input_ids)
         
         assert output.shape == (batch_size, short_seq, small_vocab_size)
 
@@ -463,15 +462,14 @@ class TestMixtral:
             max_seq_len=small_seq_len,
             device=device,
             dropout=0.5,
-            use_flash_attention=False,  # Disable flash attention for determinism
             noisy_topk=False,  # Explicitly disable noisy routing
         )
         
         model.eval()
         
         with torch.no_grad():
-            output1 = model(sample_input, inference=True)
-            output2 = model(sample_input, inference=True)
+            output1 = model(sample_input)
+            output2 = model(sample_input)
         
         assert torch.allclose(output1, output2, atol=1e-6)
 
@@ -513,7 +511,7 @@ class TestMixtral:
         input_ids = sample_input.to(device)
         
         with torch.no_grad():
-            output = model(input_ids, inference=True)
+            output = model(input_ids)
         
         assert output.device.type == "cuda"
 
@@ -540,7 +538,7 @@ class TestMixtralIntegration:
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         
         # Forward pass
-        output = model(sample_input, inference=True)
+        output = model(sample_input)
         loss = nn.functional.cross_entropy(
             output.view(-1, small_vocab_size),
             sample_labels.view(-1)
@@ -577,7 +575,7 @@ class TestMixtralIntegration:
         
         # Train for a few iterations
         for i in range(50):
-            output = model(sample_input, inference=True)
+            output = model(sample_input)
             loss = nn.functional.cross_entropy(
                 output.view(-1, small_vocab_size),
                 sample_labels.view(-1)

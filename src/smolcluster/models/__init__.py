@@ -10,7 +10,8 @@ from .moe import (
     Swish,
     TextEmbeddings,
     TransformerDecoderBlock,
-    topk_sampling,
+    ExpertBlock,
+    Router
 )
 from .SimpleNN import SimpleMNISTModel
 
@@ -28,5 +29,7 @@ __all__ = [
     "TextEmbeddings",
     "LayerNormalization",
     "Swish",
-    "topk_sampling",
+    "ExpertBlock",
+    "Router"
+    
 ]

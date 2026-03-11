@@ -20,6 +20,7 @@ from smolcluster.utils.common_utils import (
     clear_skeleton_gradients,
     extract_owned_gradients,
     forward_through_shard,
+    get_ordered_shard_layer_names,
     get_network_metrics,
     load_params_into_skeleton,
     receive_message,
@@ -95,29 +96,26 @@ def compute_activations_sequential(
         
         # Log which layers this worker has (only on first call)
         if log_layers:
-            layer_names = set()
-            for param_name in worker_params.keys():
-                parts = param_name.replace('model.', '').split('.')
-                if parts[0] == 'blocks' and len(parts) > 1:
-                    layer_names.add(f"{parts[0]}.{parts[1]}")
-                else:
-                    layer_names.add(parts[0])
-            sorted_layers = sorted(layer_names, key=lambda x: (
-                0 if x == 'token_embedding' else
-                1 if x == 'position_embedding' else
-                2 if x.startswith('blocks.') else
-                3 if x == 'ln_f' else
-                4 if x == 'lm_head' else 5
-            ))
-            logger.info(f"📦 Worker {rank} shard contains layers: {sorted_layers}")
+            sorted_layers = get_ordered_shard_layer_names(model_skeleton, rank, num_workers)
+            logger.info(f"[LAYER DISTRIBUTION] Worker {rank} owns layers: {sorted_layers}")
 
-        # Load this worker's params into skeleton (one shard at a time)
+        # The skeleton module has already been moved to `device` once in
+        # `run_fsdp_worker()`. Here we only materialize the current worker's shard
+        # tensors into that GPU-resident structure, execute its slice of the model,
+        # and then free the storage again before loading the next shard.
         load_params_into_skeleton(model_skeleton, worker_params, device)
         
-        # Forward through this worker's layers
-        activations = forward_through_shard(model_skeleton, activations, worker_params, rank, num_workers, device)
+        # Run only the layers owned by this shard. The output tensor keeps the
+        # autograd graph pointing back to the currently loaded parameter objects.
+        activations = forward_through_shard(model_skeleton, activations, rank, num_workers, device)
+
+        if log_layers:
+            logger.info(
+                f"[SHARD OUTPUT] Worker {rank} produced activation shape {tuple(activations.shape)}"
+            )
         
-        # Unload params to free memory (computation graph preserved via activations)
+        # Drop parameter storage for this shard to keep peak memory low.
+        # The activation tensor still keeps the graph metadata needed for backward.
         unload_params_from_skeleton(model_skeleton)
         
         gc.collect()
@@ -163,16 +161,21 @@ def compute_worker_gradients(
     """
     optimizer.zero_grad()
     
-    # CRITICAL: Reload ALL worker parameters before backward
-    # The computation graph from sequential forward needs all params to be valid
+    # CRITICAL: reload every shard into the already GPU-resident skeleton before
+    # backward. The sequential forward built one graph spanning all shards, so when
+    # autograd walks that graph it must find valid parameter storage for every layer
+    # it traverses, not empty placeholders.
     for rank in sorted(all_worker_params.keys()):
         worker_params = all_worker_params[rank]
         load_params_into_skeleton(model_skeleton, worker_params, device)
     
     # Compute loss (final_output preserves computation graph from forward pass)
     target = target.to(device)
+    
     B, T, C = final_output.shape
-    loss = criterion(final_output.view(B * T, C), target.view(B * T))
+    logits = final_output.view(B * T, C)
+    targets = target.view(B * T)
+    loss = criterion(logits.view(-1, C), targets)
     
     # Backward through cached computation graph (all params now loaded)
     # PyTorch traces through all layers, computes gradients for all parameters
@@ -195,7 +198,7 @@ def compute_worker_gradients(
     gc.collect()
     clear_gpu_cache(device)
     
-    return loss.detach(), grads
+    return loss, grads
 
 
 def get_lr_schedule(warmup_iters, max_iters, learning_rate, min_lr):
@@ -732,8 +735,12 @@ def run_fsdp_worker(
             logger.info(
                 "FSDP Stage 3: Broadcasting owned parameters to all peers for sequential activation computation"
             )
-            
-            parameters_received[step][worker_rank] = owned_params_dict  # Include own parameters
+
+            owned_state_dict = {
+                name: owned_params_dict[name] for name in original_owned_param_names
+            }
+
+            parameters_received[step][worker_rank] = owned_state_dict
 
             for peer_rank, peer_socket in outbound_worker_sockets.items():
                 send_message(
@@ -742,12 +749,12 @@ def run_fsdp_worker(
                         "all_reduce",
                         step,
                         worker_rank,
-                        owned_params_dict,  # Send dict of {layer_name: param_tensor}
+                        owned_state_dict,
                         'parameters',
                     ),
                 )
                 logger.info(
-                    f"[Step {step}] Worker {worker_rank} sent {len(owned_params_dict)} owned parameters to worker {peer_rank}"
+                    f"[Step {step}] Worker {worker_rank} sent {len(owned_state_dict)} owned parameters to worker {peer_rank}"
                 )
                 
             logger.info(
@@ -950,26 +957,29 @@ def run_fsdp_worker(
                     f"[Step {step}  / {num_epochs * len(train_loader)}] Combining gradients from {len(grads_received[step])} participants"
                 )
 
-               
                 logger.info(
                     f"[Step {step}] Worker {worker_rank} applying averaged gradients to owned parameters"
                 )
 
-                # FSDP Stage 3: Accumulate gradients for owned parameters
-                # Average gradients across all workers
+                optimizer.zero_grad()
+
+                # Average gradients across all workers for this worker's owned parameters only
                 for peer_rank, peer_grads in grads_received[step].items():
                     logger.info(
                         f"[Step {step}] Worker {worker_rank} accumulating gradients from worker {peer_rank} (scaled by 1/{NUM_WORKERS})"
                     )
-                    
-                    # Accumulate into owned_param_list (only our owned params)
+
                     for i, layer_name in enumerate(original_owned_param_names):
                         if layer_name in peer_grads:
                             if owned_param_list[i].grad is None:
-                                owned_param_list[i].grad = peer_grads[layer_name].to(device) / NUM_WORKERS
+                                owned_param_list[i].grad = (
+                                    peer_grads[layer_name].to(device) / NUM_WORKERS
+                                )
                             else:
-                                owned_param_list[i].grad += peer_grads[layer_name].to(device) / NUM_WORKERS
-                    
+                                owned_param_list[i].grad += (
+                                    peer_grads[layer_name].to(device) / NUM_WORKERS
+                                )
+
                     logger.info(
                         f"[Step {step}] Worker {worker_rank} accumulated gradients from worker {peer_rank}"
                     )
@@ -1055,19 +1065,14 @@ def run_fsdp_worker(
                     step_event.wait()
                     step_event.clear()
 
-                # FSDP Stage 3: Merge weights from all workers into owned_params_dict
-                for peer_rank, peer_weights in weights_received[step].items():
-                    for layer_name, weight_data in peer_weights.items():
-                        owned_params_dict[layer_name] = weight_data
-                
-                # Sync only OUR owned weights back to owned_param_list for optimizer
-                # (we received updates from other workers for our params)
+                # Keep only this worker's shard authoritative locally.
+                # Peer weights are used only for synchronization visibility; the next
+                # step's parameter all-gather provides the full set of remote shards.
                 for i, name in enumerate(original_owned_param_names):
-                    if name in owned_params_dict:
-                        owned_param_list[i].data = owned_params_dict[name].to(device)
+                    owned_param_list[i].data = owned_params_dict[name].to(device)
                 
                 logger.info(
-                    f"[Step {step}] Worker {worker_rank} merged weights from all workers into owned_params_dict"
+                    f"[Step {step}] Worker {worker_rank} kept local shard state after weight broadcast"
                 )
                 
                 # Cleanup old weights beyond staleness window

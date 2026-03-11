@@ -1,263 +1,1206 @@
-"""
-Expert Parallelism worker for distributed MoE training.
-
-This module handles the expert parallelism algorithm for training Mixture of Experts models.
-Model definitions have been moved to smolcluster.models.moe for reusability across algorithms.
-"""
-
+import gc
+import logging
 import math
+import socket
+import threading
+import time
+from collections import defaultdict
+from pathlib import Path
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchinfo import summary
+import torchinfo
+import wandb
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-# Import MoE model from the models module
-from smolcluster.models.moe import Mixtral, topk_sampling
+from smolcluster.models.moe import ExpertBlock, Mixtral, Router, TextEmbeddings
+from smolcluster.utils.checkpointing import CheckpointManager, should_save_checkpoint
+from smolcluster.utils.common_utils import (
+    get_gradients,
+    get_network_metrics,
+    receive_message,
+    send_message,
+    set_gradients
+)
+from smolcluster.utils.layers import get_expert_per_node
+from smolcluster.utils.logging_utils import setup_cluster_logging
 
-# Note: ModelArgs should be defined elsewhere or passed as configuration
-# This is a placeholder to maintain backward compatibility
-class ModelArgs:
-    """Model configuration arguments. Should be loaded from config file."""
+step = 0  # Global step counter to track training progress across threads
 
-    # Model architecture
-    embeddings_dims: int = 768
-    vocab_size: int = 50257
-    no_of_heads: int = 12
-    no_of_decoder_layers: int = 12
-    block_size: int = 1024
-    batch_size: int = 32
+
+def reduce(
+    grads_dict: dict[int, dict[str, torch.Tensor]], num_workers_connected: int
+) -> dict[str, torch.Tensor]:
+    """Average gradients from all workers."""
+    grads_reduced = {}
+    for worker_id in list(grads_dict):
+        for name, worker_grads in grads_dict[worker_id].items():
+            grads_reduced[name] = grads_reduced.get(name, 0.0) + (
+                worker_grads / num_workers_connected
+            )
+
+    return grads_reduced
+
+
+def compute_leader_activations(
+    device: torch.device,
+    model: torch.nn.Module,
+    activations: torch.Tensor,
     
-    # MoE specific
-    experts: int = 8
-    top_experts: int = 2
-    noisy_topk: bool = False
     
-    # Training
-    dropout: float = 0.1
-    attn_dropout: float = 0.1
-    max_lr: float = 3e-4
+) -> torch.Tensor:
+    """Compute gradients for worker rank 0 (leader node)."""
+
+    activations = activations.to(device)
+    out = model(activations)
     
-    # Optimization flags
-    use_liger: bool = False
-    use_flash_attention: bool = True
-    use_checkpointing: bool = False
+    return out
+
+def get_expert_probs_and_indices(router: Router, data: torch.Tensor, text_embeds: TextEmbeddings) -> tuple[torch.Tensor, torch.Tensor]:
+    """Get expert probabilities and indices from the router."""
     
-    # Device
-    device: torch.device = torch.device("cpu")
-
-
-
-# Placeholder tokenizer - should be imported from data module
-tokenizer = None  # Will be set by the training script
-
-
-def create_mixtral_model(config=None):
-    """Create a Mixtral model instance from configuration.
+    out = text_embeds(data)
+    expert_probs, expert_indices = router(out)
+    return expert_probs, expert_indices
     
+
+def evaluate(
+    device: torch.device,
+    model: torch.nn.Module,
+    val_loader: DataLoader,
+    criterion: torch.nn.Module,
+    decoder_type_ppl: bool = False,
+) -> tuple[float, float]:
+    """Evaluate model on validation set."""
+    model.eval()
+    total_val_loss = 0.0
+
+    with torch.no_grad():
+        for data, target in val_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            B, T, C = output.shape
+            output = output.view(B * T, C)
+            target = target.view(B * T)
+            loss = criterion(output, target)
+            total_val_loss += loss.item()
+    avg_loss = total_val_loss / len(val_loader)
+    ppl = math.exp(avg_loss) if decoder_type_ppl else None
+
+    return avg_loss, ppl
+
+
+def clear_gpu_cache(device: torch.device) -> None:
+    """Clear GPU cache for both MPS and CUDA devices."""
+    if device.type == "mps":
+        torch.mps.empty_cache()
+    elif device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+def compute_leader_gradients(
+    device: torch.device,
+    model: torch.nn.Module,
+    data: torch.Tensor,
+    target: torch.Tensor,
+    criterion: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    config: dict
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compute gradients for leader/server node."""
+    optimizer.zero_grad()
+    
+    model.train()
+    data, target = data.to(device), target.to(device)
+    output = model(data)
+    B, T, C = output.shape
+    output = output.view(B * T, C)
+    target = target.view(B * T)
+    loss = criterion(output, target)
+    loss.backward()
+    # Gradient clipping
+    if config.get("gradient_clipping", {}).get("enabled", False):
+        max_norm = config["gradient_clipping"].get("max_norm", 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
+    grads = get_gradients(model)
+    return loss, grads
+
+
+def get_lr_schedule(warmup_iters, max_iters, learning_rate, min_lr):
+    """Create learning rate schedule with linear warmup and cosine decay.
+
     Args:
-        config: Configuration object or dict with model parameters.
-        
+        warmup_iters: Number of warmup iterations
+        max_iters: Total training iterations
+        learning_rate: Peak learning rate (after warmup)
+        min_lr: Minimum learning rate (end of decay)
+
     Returns:
-        Mixtral model instance.
+        Function that takes step and returns learning rate
     """
-    if config is None:
-        # Use ModelArgs defaults
-        model = Mixtral(
-            vocab_size=ModelArgs.vocab_size,
-            embeddings_dims=ModelArgs.embeddings_dims,
-            no_of_heads=ModelArgs.no_of_heads,
-            no_of_decoder_layers=ModelArgs.no_of_decoder_layers,
-            num_experts=ModelArgs.experts,
-            top_k=ModelArgs.top_experts,
-            max_seq_len=ModelArgs.block_size,
-            device=ModelArgs.device,
-            attn_dropout=ModelArgs.attn_dropout,
-            dropout=ModelArgs.dropout,
-            noisy_topk=ModelArgs.noisy_topk,
-            use_checkpointing=ModelArgs.use_checkpointing,
-            use_flash_attention=ModelArgs.use_flash_attention,
-            use_liger=ModelArgs.use_liger,
-            tokenizer=tokenizer,
+
+    def get_lr(step):
+        # Linear warmup
+        if step < warmup_iters:
+            return learning_rate * (step + 1) / warmup_iters
+
+        # Cosine decay after warmup
+        if step > max_iters:
+            return min_lr
+
+        decay_ratio = (step - warmup_iters) / (max_iters - warmup_iters)
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (learning_rate - min_lr)
+
+    return get_lr
+
+
+# Setup logging (will be replaced by setup_cluster_logging in run_modelparallelism_without_ps_worker)
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = None  # Will be set in run_modelparallelism_pipeline_worker
+
+
+def handle_worker(
+    conn: socket.socket,
+    addr: tuple[str, int],
+    workers: dict,
+    tokens_received: dict,
+    grads_received: dict,
+    reduced_grads_received: dict,
+    step_event: threading.Event,
+    lock: threading.Lock,
+    weights_received: dict,
+) -> None:
+    """Handle individual worker connections and gradient reception."""
+    logger.info(f"Handling worker at {addr}")
+
+    while True:
+        try:
+            message = receive_message(conn)
+
+            # Handle connection closed or empty message
+            if message is None:
+                # logger.info(f"Worker {addr} closed connection")
+                logger.warning(f"Received empty message from worker {addr}")
+                break
+
+            logger.debug(len(message))
+
+            command, recv_step, rank, data = message
+
+            if command == "route_tokens":
+                logger.info(
+                    f"Received message '{command}' from worker {addr} (rank {rank}) for step {recv_step}"
+                )
+                logger.info(f"[Step {recv_step}] Storing routed tokens from worker {rank}")
+
+                with lock:
+                    tokens_received[recv_step][rank] = data
+                    logger.info(
+                        f"[Step {recv_step}] Now have {len(tokens_received[recv_step])} token sets"
+                    )
+
+                step_event.set()
+            
+            elif command == "share_gradients":
+                logger.info(
+                    f"Received message '{command}' from worker {addr} (rank {rank}) for step {recv_step}"
+                )
+                logger.info(f"[Step {recv_step}] Storing gradients from worker {rank}")
+
+                with lock:
+                    grads_received[recv_step][rank] = data
+                    logger.info(
+                        f"[Step {recv_step}] Now have {len(grads_received[recv_step])} gradient sets"
+                    )
+
+                step_event.set()
+
+            elif command == "all_reduce":
+                logger.info(
+                    f"[Step {recv_step}] Received reduced gradients from worker {rank}"
+                )
+                
+                # Buffer gradients by step - handle out-of-order delivery
+                with lock:
+                    reduced_grads_received[recv_step][rank] = data
+                    logger.info(
+                        f"[Step {recv_step}] Buffered reduced gradients from worker {rank}. "
+                        f"Now have {len(reduced_grads_received[recv_step])} reduced gradient sets for this step"
+                    )
+                
+                step_event.set()
+
+            elif command == "broadcast_weights":
+                logger.info(
+                    f"Received broadcast weights message from worker {addr} (rank {rank})"
+                )
+                # Handle any broadcast messages if needed
+                
+                 # Buffer weights by step - handle out-of-order delivery
+                with lock:
+                    weights_received[recv_step][rank] = data
+                    logger.info(
+                        f"[Step {recv_step}] Buffered weights from worker {rank}. "
+                        f"Now have {len(weights_received[recv_step])} weight sets for this step"
+                    )
+                
+                step_event.set()
+            elif command == "down":
+                logger.info(f"Worker {addr} requested shutdown")
+                break
+
+        except Exception as e:
+            logger.error(f"Error handling worker {addr}: {e}")
+            break
+    logger.info(f"Worker {addr} disconnected")
+    conn.close()
+
+
+def accept_workers(
+    sock: socket.socket,
+    NUM_WORKERS: int,
+    workers: dict,
+    model_name: str,
+    tokens_received: dict,
+    grads_received: dict,
+    reduced_grads_received: dict,
+    weights_received: dict,
+    step_event: threading.Event,
+    lock: threading.Lock,
+) -> None:
+    # Accept connections and wait for registration
+    expected_peers = max(NUM_WORKERS - 1, 0)
+    registered_workers = {}  # rank -> socket
+    while len(registered_workers) < expected_peers:
+        client_socket, client_address = sock.accept()
+        logger.info(f"Accepted connection from {client_address}")
+
+        # Wait for registration message
+        try:
+            message = receive_message(client_socket)
+            if message is None:
+                logger.warning(
+                    f"Connection from {client_address} closed before registration"
+                )
+                client_socket.close()
+                break
+
+            command, worker_rank = message
+            if command == "register":
+                logger.info(f"Worker {worker_rank} registered from {client_address}")
+                registered_workers[worker_rank] = client_socket
+                workers[client_address] = client_socket
+                threading.Thread(
+                    target=handle_worker,
+                    args=(
+                        client_socket,
+                        client_address,
+                        workers,
+                        tokens_received,
+                        grads_received,
+                        reduced_grads_received,
+                        step_event,
+                        lock,
+                        weights_received,
+                    ),
+                    daemon=True,
+                ).start()
+            else:
+                logger.warning(f"Unexpected message from {client_address}: {command}")
+                client_socket.close()
+                break
+
+        except Exception as e:
+            logger.error(f"Error during registration from {client_address}: {e}")
+            client_socket.close()
+            break
+
+    logger.info("All workers connected. Starting training...")
+
+def route_tokens(expert_probs: torch.Tensor, expert_indices: torch.Tensor, num_experts: int, expert_shard: list) -> torch.Tensor:
+    """Route tokens to experts based on router output."""
+
+    # Route to experts
+    for expert_idx in range(num_experts):
+
+            if expert_idx in expert_shard:
+                
+                # Create mask for current expert across all top_k positions
+                expert_mask = expert_indices == expert_idx
+
+                # Sum probabilities for current expert
+                expert_weights = (expert_probs * expert_mask).sum(dim=-1)  # [batch_size, seq_len]
+
+                # Get inputs where expert is used
+                selected = expert_weights > 0
+                if not selected.any():
+                    continue
+            
+    return selected
+    
+
+
+def run_fsdp_worker(
+    model,
+    train_loader,
+    val_loader,
+    config,
+    cluster_config,
+    worker_rank,
+    hostname,
+    device,
+    criterion,
+    host_ip,
+    port,
+    resume_checkpoint_path=None,
+):
+    """
+    Run FSDP (ZeRO Stage 0) training with optimizer state partitioning.
+    Workers partition optimizer states while maintaining full model and gradient replicas.
+
+    Args:
+        model: PyTorch model to train
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        config: Training configuration dict (nn_config)
+        cluster_config: Cluster configuration dict
+        hostname: Worker hostname
+        device: Device to run on
+        criterion: Loss criterion
+    """
+    global logger
+
+    # Setup logger for this worker rank
+    logger = logging.getLogger(f"[WORKER-{worker_rank}]")
+
+    # Configure centralized logging
+    setup_cluster_logging(
+        logger=logger,
+        component="worker",
+        rank=worker_rank,
+        hostname=hostname,
+        log_dir=config.get("log_dir", "/tmp/smolcluster-logs"),
+    )
+    logger.info(f"🚀 FSDP Worker rank {worker_rank} starting up (ZeRO Stage 0)")
+
+    # Extract configuration
+    batch_size = config["batch_size"]
+    num_epochs = config["num_epochs"]
+    eval_steps = config["eval_steps"]
+    num_experts = config["num_experts"]
+    track_gradients = config["track_gradients"]
+    decoder_type_ppl = config.get("decoder_type", {}).get("ppl", False)
+    learning_rate = config["learning_rate"]
+    embedding_dims = config["embedding_dims"]
+    grad_clip_norm = config.get("grad_clip_norm", 0.0)
+    no_of_heads = config["no_of_heads"]
+    no_of_decoder_layers = config["no_of_decoder_layers"]
+    top_k = config["top_k"]
+    max_seq_len = config["max_seq_len"]
+    attn_dropout = config.get("attn_dropout", 0.0)
+    dropout = config.get("dropout", 0.0)
+    noisy_topk = config.get("noisy_topk", False)
+    use_checkpointing = config.get("use_checkpointing", False)
+    vocab_size = config["vocab_size"]
+    
+    staleness_bound = cluster_config.get("staleness_bound", 0)  # 0 = strict sync, >0 = bounded async
+    NUM_WORKERS = cluster_config["num_workers"]
+    
+    if staleness_bound > 0:
+        logger.info(f"Bounded staleness enabled: staleness_bound={staleness_bound}")
+    else:
+        logger.info("Strict synchronous training enabled (staleness_bound=0)")
+
+    # Checkpoint configuration
+    save_checkpoints = config.get("save_checkpoints", True)
+    checkpoint_dir = config.get("checkpoint_dir", "checkpoints")
+    checkpoint_steps = config.get("checkpoint_steps", 500)
+    # Prioritize command-line resume path over config value
+    resume_from_checkpoint = resume_checkpoint_path or config.get(
+        "resume_from_checkpoint", None
+    )
+    max_checkpoints_to_keep = config.get("max_checkpoints_to_keep", 3)
+    save_optimizer_state = config.get("save_optimizer_state", True)
+
+    # Initialize checkpoint manager
+    project_root = Path(__file__).parent.parent.parent.parent.parent
+    full_checkpoint_dir = project_root / checkpoint_dir / "fsdp"
+    checkpoint_manager = CheckpointManager(
+        checkpoint_dir=str(full_checkpoint_dir),
+        max_checkpoints=max_checkpoints_to_keep,
+        save_optimizer=save_optimizer_state,
+        rank=worker_rank,
+        algorithm="fsdp",
+    )
+
+    # Network configuration
+    buffer_size_mb = cluster_config.get("buffer_size", {}).get(hostname, 4)
+    track_network_metrics = cluster_config.get("track_network_metrics", False)
+    metrics_log_interval = cluster_config.get("metrics_log_interval", 50)
+    logger.info(f"Network buffer size: {buffer_size_mb}MB")
+    logger.info(f"Network metrics tracking: {track_network_metrics}")
+
+    # Thread-safe data structures
+    step_event = threading.Event()
+    lock = threading.Lock()
+    workers = {}
+    outbound_worker_sockets = {}
+    tokens_received = defaultdict(dict)  # Buffer for routed tokens from peers
+    grads_received = defaultdict(dict)
+    reduced_grads_received = defaultdict(dict)  # Buffer for scatter-reduce gradients
+    weights_received = defaultdict(dict)  # Buffer for broadcast weights
+    num_nodes = cluster_config["num_nodes"]
+    
+    # Staleness tracking (only if staleness_bound > 0)
+    staleness_stats = {
+        "all_gather_step_diffs": [],  # Track step differences for all_gather gradients
+        "all_reduce_step_diffs": [],  # Track step differences for all_reduce gradients
+        "stale_gradient_count": 0,  # Count of gradients with step_diff > 0
+        "max_step_diff": 0,  # Maximum step difference observed
+        "broadcast_weights_step_diffs": [],  # Track step differences for broadcast weights
+        "stale_weight_count": 0,  # Count of weights with step_diff > 0
+    }
+
+    # Gradient clipping
+    if grad_clip_norm > 0.0:
+        logger.info(f"Gradient clipping enabled: max_norm={grad_clip_norm}")
+    else:
+        logger.info("Gradient clipping disabled")
+
+    # Load model
+    model = model.to(device)
+    logger.info(f"Model initialized on device: {device}")
+    
+    #Get the expert for this node
+    
+    expert_shard = get_expert_per_node(worker_rank, num_nodes, num_experts)
+    
+    text_embedding = TextEmbeddings(vocab_size=vocab_size, embeddings_dims=embedding_dims, device=device)
+    
+    router = Router(
+        embeddings_dims=embedding_dims,
+        num_experts=len(expert_shard),
+        top_k=top_k,
+        device=device,
+        noisy_topk=noisy_topk
+    )
+    
+
+    model = Mixtral(
+        vocab_size=vocab_size,
+        embeddings_dims=embedding_dims,
+        no_of_heads=no_of_heads,
+        no_of_decoder_layers=no_of_decoder_layers,
+        num_experts=len(expert_shard),
+        top_k=top_k,
+        max_seq_len=max_seq_len,
+        device=device,
+        attn_dropout=attn_dropout,
+        dropout=dropout,
+        noisy_topk=noisy_topk,
+        use_checkpointing=use_checkpointing,
+        router=router
+    )
+    
+    logger.info(f"Worker rank {worker_rank} loaded {len(expert_shard)} experts for this node")
+   
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    logger.info(
+        f"Created optimizer for worker rank {worker_rank} with lr={learning_rate}"
+    )
+
+    
+    # Log model summary
+    model_summary = str(torchinfo.summary(model, verbose=0, device=device))
+    logger.info("Model Summary:")
+    logger.info(model_summary)
+    wandb.log({"model_structure": model_summary})
+
+    # Load model layers for this worker rank
+    config["num_layers"] = cluster_config["num_layers"]
+    logger.info(f"Loading worker rank {worker_rank}'s share of model layers...")
+
+    model = model.to(device)
+    logger.info(
+        f"Worker rank {worker_rank} loaded model layers and moved to device: {device}"
+    )
+
+    
+
+    # Learning rate scheduler setup (after optimizer creation)
+    use_lr_scheduler = config.get("use_lr_scheduler", False)
+    total_steps = num_epochs * len(train_loader)
+    scheduler = None
+    if use_lr_scheduler:
+        warmup_iters = config["warmup_iters"]
+        min_lr = config["min_lr"]
+        get_lr_fn = get_lr_schedule(warmup_iters, total_steps, learning_rate, min_lr)
+        # Wrap custom LR function in LambdaLR scheduler for proper state saving
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda step: get_lr_fn(step) / learning_rate
+        )
+        logger.info(
+            f"LR scheduler enabled: warmup={warmup_iters}, max_iters={total_steps}, peak_lr={learning_rate}, min_lr={min_lr}"
         )
     else:
-        # Use provided config
-        model = Mixtral(
-            vocab_size=config.get('vocab_size', ModelArgs.vocab_size),
-            embeddings_dims=config.get('embeddings_dims', ModelArgs.embeddings_dims),
-            no_of_heads=config.get('no_of_heads', ModelArgs.no_of_heads),
-            no_of_decoder_layers=config.get('no_of_decoder_layers', ModelArgs.no_of_decoder_layers),
-            num_experts=config.get('num_experts', ModelArgs.experts),
-            top_k=config.get('top_k', ModelArgs.top_experts),
-            max_seq_len=config.get('max_seq_len', ModelArgs.block_size),
-            device=config.get('device', ModelArgs.device),
-            attn_dropout=config.get('attn_dropout', ModelArgs.attn_dropout),
-            dropout=config.get('dropout', ModelArgs.dropout),
-            noisy_topk=config.get('noisy_topk', ModelArgs.noisy_topk),
-            use_checkpointing=config.get('use_checkpointing', ModelArgs.use_checkpointing),
-            use_flash_attention=config.get('use_flash_attention', ModelArgs.use_flash_attention),
-            use_liger=config.get('use_liger', ModelArgs.use_liger),
-            tokenizer=config.get('tokenizer', tokenizer),
+        logger.info(f"LR scheduler disabled, using constant lr={learning_rate}")
+
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    start_step = 0
+    if save_checkpoints and resume_from_checkpoint:
+        if resume_from_checkpoint == "latest":
+            checkpoint_path = checkpoint_manager.find_latest_checkpoint()
+        else:
+            checkpoint_path = resume_from_checkpoint
+
+        if checkpoint_path:
+            logger.info(f"Resuming from checkpoint: {checkpoint_path}")
+            # Create a temporary model with only this worker's layers for loading
+
+            metadata = checkpoint_manager.load_checkpoint(
+                checkpoint_path=checkpoint_path,
+                model=model,
+                optimizer=optimizer if save_optimizer_state else None,
+                scheduler=scheduler,  # Load scheduler state if it exists
+                device=device,
+            )
+            # Checkpoint manager already loaded state into model, just extract metadata
+            start_epoch = metadata.get("epoch", 0)
+            start_step = metadata.get("step", 0)
+            logger.info(f"Resumed from epoch={start_epoch}, step={start_step}")
+        else:
+            logger.warning("No checkpoint found to resume from, starting fresh")
+
+    logger.info("Starting all-to-all topology setup for FSDP (ZeRO Stage 0).")
+
+    # Get my worker configuration from allToAllTopology
+    workers_list = cluster_config["allToAllTopology"]["workers"]["regular"]
+    my_worker_config = next(w for w in workers_list if w["rank"] == worker_rank)
+    my_port = my_worker_config["port"]
+
+    # Step 1: Each worker binds to its configured port
+    HOST_IP = "0.0.0.0"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((HOST_IP, my_port))
+    sock.listen(NUM_WORKERS)  # Allow multiple connections for worker registration
+    logger.info(f"Worker {worker_rank} listening on port {my_port}")
+
+    # Step 2: Connect to next worker in linear topology (if not last worker)
+    max_retries = 120
+    retry_delay = 2
+
+    for _ in range(NUM_WORKERS - 1):
+        # Connect to next worker in the chain
+        next_worker = next(w for w in workers_list if w["rank"] != worker_rank)
+        next_ip = next_worker["ip"]
+        next_port = next_worker["port"]
+        next_rank = next_worker["rank"]
+        del workers_list[
+            workers_list.index(next_worker)
+        ]  # Remove the next worker from the list to avoid duplicate connections
+
+        logger.info(
+            f"Worker {worker_rank} will connect to worker {next_rank} at {next_ip}:{next_port}"
         )
-    return model
+        time.sleep(worker_rank * 0.5)  # Stagger connections
 
+        for attempt in range(max_retries):
+            try:
+                next_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                next_sock.connect((next_ip, next_port))
+                send_message(next_sock, ("register", worker_rank))
 
-# Example model instantiation for backward compatibility
-model = create_mixtral_model()
-model = model.to(ModelArgs.device)
+                logger.info(
+                    f"Worker {worker_rank} connected to worker {next_rank} at {next_ip}:{next_port}"
+                )
+                outbound_worker_sockets[next_worker["rank"]] = (
+                    next_sock  # This is important because this has the IP + PORT to which the nodes connected to it listen to which is what we have defined and not send stuff to the port we received through sock.accept()!
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Connection to worker {next_rank} failed (attempt {attempt + 1}/{max_retries} at IP: {next_ip}:{next_port}): {e}. "
+                        f"Retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(
+                        f"Failed to connect to worker {next_rank} after {max_retries} attempts: {e}"
+                    )
+                    raise
 
-# Printing a summary of the architecture
-idx = torch.randint(
-    low=0,
-    high=ModelArgs.vocab_size,
-    size=(ModelArgs.batch_size, ModelArgs.block_size),
-    dtype=torch.long
-)
-idx = idx.to(ModelArgs.device)
-
-print(
-    summary(
-        model=model,
-        input_data=idx,
-        col_names=["input_size", "output_size", "num_params", "trainable"],
-        col_width=20,
-        row_settings=["var_names"],
+    # Step 3: Accept connection from all workers
+    accept_workers(
+        sock,
+        NUM_WORKERS,
+        workers=workers,
+        model_name="",
+        tokens_received=tokens_received,
+        grads_received=grads_received,
+        reduced_grads_received=reduced_grads_received,
+        weights_received=weights_received,
+        step_event=step_event,
+        lock=lock
     )
-)
 
-# Utility functions
+    logger.info(f"All workers connected. Starting training for {num_epochs} epochs.")
 
-def find_unused_parameters(model):
-    """Find model parameters that didn't receive gradients.
-    
-    Args:
-        model: PyTorch model to inspect.
+    for epoch in range(start_epoch, num_epochs):
+        total_loss = 0.0
+        val_loss = None #to make the ckpt manager happy at the end of the epoch when it tries to save the checkpoint and log the val_loss in the metadata
         
-    Returns:
-        List of parameter names without gradients.
-    """
-    unused = []
-    for name, param in model.named_parameters():
-        if param.grad is None:
-            unused.append(name)
-    return unused
+        model.train()
 
+        global step  # Declare step as global to modify the global step counter
 
-def save_to_file(step, text):
-    """Save generated text to a file.
-    
-    Args:
-        step: Training step number.
-        text: Generated text to save.
-    """
-    with open(f'/generations_{step}.txt', 'w') as f:
-        f.write(f"------------------------------------------------Step: {step}--------------------------------------------\n\n")
-        f.write(text + "\n\n")
+        logger.info(f"Starting epoch {epoch + 1}/{num_epochs}")
 
+        # Create batch progress bar for this epoch (only for rank 0)
+        batch_pbar = tqdm(
+            enumerate(train_loader),
+            total=len(train_loader),
+            desc=f"Epoch {epoch + 1}/{num_epochs}",
+            leave=True,
+            ncols=120,
+            disable=(worker_rank != 0),
+        )
 
-# Training configuration and setup
+        for batch_idx, (data, target) in batch_pbar:
+            step = epoch * len(train_loader) + batch_idx
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cuda.enable_flash_sdp(True)  # Enable FlashAttention
-torch.set_float32_matmul_precision('high')
+            # Skip batches if resuming mid-epoch
+            if step < start_step:
+                continue
 
-# Training hyperparameters
-save_checkpoint_iter = 2000
-total_iters = 20000
-eval_iters = 200
-eval_check = 200
-warmup_iters = 1000
-min_lr = 0.1 * ModelArgs.max_lr
-lr_decay_iters = 20000
-total_batch_size = 524288
-micro_batch_size = ModelArgs.batch_size
-gradient_accumulation_steps = total_batch_size // (micro_batch_size * (ModelArgs.block_size * 1))
+            batch_start_time = time.time()
+            data = data.to(device)
+            target = target.to(device)
+            # Update learning rate if scheduler enabled
+            if scheduler is not None:
+                current_lr = scheduler.get_last_lr()[0]
+            else:
+                current_lr = learning_rate
 
+            activations = None
 
-# Learning rate scheduler (cosine with warmup)
-# From https://github.com/karpathy/nanoGPT/blob/master/train.py
+            # Each worker computes its own gradients on its local data
+            logger.info(
+                f"[Step {step}/{num_epochs * len(train_loader)}] Worker rank {worker_rank} computing local gradients"
+            )
 
-class CustomLRScheduler:
-    """Custom learning rate scheduler with warmup and cosine decay."""
-    
-    def __init__(self, optimizer, warmup_iters, lr_decay_iters, min_lr, max_lr):
-        """Initialize the scheduler.
-        
-        Args:
-            optimizer: PyTorch optimizer.
-            warmup_iters: Number of warmup iterations.
-            lr_decay_iters: Number of iterations for LR decay.
-            min_lr: Minimum learning rate.
-            max_lr: Maximum learning rate.
-        """
-        self.optimizer = optimizer
-        self.warmup_iters = warmup_iters
-        self.lr_decay_iters = lr_decay_iters
-        self.min_lr = min_lr
-        self.max_lr = max_lr
-        self.it = 0
-        self._last_lr = [max_lr]  # Initialize with max_lr (matching PyTorch convention)
-        
-    def step(self):
-        """Perform a scheduler step."""
-        self._last_lr = [self._get_lr()]  # Store as list
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self._last_lr[0]
-        self.it += 1
+            expert_probs, expert_indices = get_expert_probs_and_indices(router, data, text_embedding)
+            
+            routed_tokens = route_tokens(expert_probs, expert_indices, num_experts, expert_shard)
+            
+            # Store local routed tokens
+            with lock:
+                tokens_received[step][worker_rank] = {
+                    'tokens': data,
+                    'routed_mask': routed_tokens,
+                    'expert_probs': expert_probs,
+                    'expert_indices': expert_indices
+                }
 
-    def get_last_lr(self):
-        """Get the last computed learning rate.
-        
-        Returns:
-            List containing the last learning rate.
-        """
-        return self._last_lr  # Returns list to match PyTorch convention
-    
-    def _get_lr(self):
-        """Compute the current learning rate.
-        
-        Returns:
-            Current learning rate value.
-        """
-        # 1) linear warmup for warmup_iters steps
-        if self.it < self.warmup_iters:
-            return self.max_lr * (self.it + 1) / (self.warmup_iters + 1)
-        # 2) if it > lr_decay_iters, return min learning rate
-        if self.it > self.lr_decay_iters:
-            return self.min_lr
-        # 3) in between, use cosine decay down to min learning rate
-        decay_ratio = (self.it - self.warmup_iters) / (self.lr_decay_iters - self.warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) 
-        return self.min_lr + coeff * (self.max_lr - self.min_lr)
-    
-    def state_dict(self):
-        """Get the scheduler state dict.
-        
-        Returns:
-            Dictionary containing scheduler state.
-        """
-        return {
-            'warmup_iters': self.warmup_iters,
-            'lr_decay_iters': self.lr_decay_iters,
-            'min_lr': self.min_lr,
-            'max_lr': self.max_lr,
-            'it': self.it
-        }
-    
-    def load_state_dict(self, state_dict):
-        """Load the scheduler state dict.
-        
-        Args:
-            state_dict: Dictionary containing scheduler state.
-        """
-        self.warmup_iters = state_dict['warmup_iters']
-        self.lr_decay_iters = state_dict['lr_decay_iters']
-        self.min_lr = state_dict['min_lr']
-        self.max_lr = state_dict['max_lr']
-        self.it = state_dict['it']
+            # Phase 1: Route tokens - send routed tokens to all peers for expert processing
+            logger.info(
+                f"[Step {step}] Phase 1: Broadcasting routed tokens to all peers for expert processing"
+            )
 
+            for peer_rank, peer_socket in outbound_worker_sockets.items():
+                send_message(
+                    peer_socket,
+                    (
+                        "route_tokens",
+                        step,
+                        worker_rank,
+                        {
+                            'tokens': data,
+                            'routed_mask': routed_tokens,
+                            'expert_probs': expert_probs,
+                            'expert_indices': expert_indices
+                        },
+                    ),
+                )
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} sent routed tokens to worker {peer_rank}"
+                )
+            # Wait for all workers to send their routed tokens for this step
+            logger.info(f"[Step {step}] Waiting for routed tokens from all peers...")
+            while True:
+                with lock:
+                    # Clean up old tokens beyond staleness window FIRST
+                    if staleness_bound > 0:
+                        for old_step in list(tokens_received.keys()):
+                            if old_step < step - staleness_bound:
+                                logger.info(f"[Step {step}] Cleaning up stale tokens from step {old_step}")
+                                tokens_received.pop(old_step, None)
+                    
+                    # Only check staleness if bounded async is enabled
+                    if staleness_bound > 0:
+                        for recv_step in list(tokens_received.keys()):
+                            # Only check steps within the staleness window
+                            if recv_step >= step - staleness_bound:
+                                step_diff = abs(recv_step - step)
+                                
+                                # Track staleness statistics
+                                staleness_stats["all_gather_step_diffs"].append(step_diff)
+                                staleness_stats["max_step_diff"] = max(
+                                    staleness_stats["max_step_diff"], step_diff
+                                )
+                                if step_diff > 0:
+                                    staleness_stats["stale_gradient_count"] += 1
+                                
+                                if step_diff > staleness_bound:
+                                    logger.error(
+                                        f"[Step {step}] STALENESS VIOLATION: Received tokens from step {recv_step} "
+                                        f"(diff={step_diff} > bound={staleness_bound}). Training stopped."
+                                    )
+                                    raise RuntimeError(
+                                        f"Staleness bound violated: step difference {step_diff} exceeds bound {staleness_bound}"
+                                    )
+                    
+                    curr_tokens_len = len(tokens_received[step])
 
+                logger.info(
+                    f"Worker {worker_rank} - Epoch {epoch + 1}/{num_epochs}, Step {step}/{num_epochs * len(train_loader)}: Received routed tokens from {curr_tokens_len - 1}/{NUM_WORKERS - 1} peers (total: {curr_tokens_len}/{NUM_WORKERS})."
+                )
+                if curr_tokens_len < NUM_WORKERS:
+                    logger.info(f"Waiting for more routed tokens for step {step}...")
+                    step_event.wait(timeout=1.0)
+                    step_event.clear()
+                else:
+                    break
 
+            # Process routed tokens through local experts and compute gradients
+            logger.info(f"[Step {step}] Processing tokens through local experts and computing gradients")
+            
+            # Gather all routed tokens for this worker's experts
+            all_routed_data = []
+            for peer_rank, token_data in tokens_received[step].items():
+                peer_tokens = token_data['tokens']
+                peer_mask = token_data['routed_mask']
+                if peer_mask.any():
+                    all_routed_data.append(peer_tokens[peer_mask])
+            
+            # Compute gradients on routed tokens
+            if all_routed_data:
+                combined_tokens = torch.cat(all_routed_data, dim=0)
+                local_loss, local_grads = compute_leader_gradients(
+                    device, model, combined_tokens, target, criterion, optimizer, config
+                )
+            else:
+                # No tokens routed to this worker's experts
+                logger.warning(f"[Step {step}] Worker {worker_rank} received no tokens for its experts")
+                local_grads = {name: torch.zeros_like(param) for name, param in model.named_parameters()}
+                local_loss = torch.tensor(0.0, device=device)
+            
+            with lock:
+                grads_received[step][worker_rank] = local_grads
 
+            total_loss += local_loss.item()
+            
+            # Clear GPU cache
+            clear_gpu_cache(device)
+            
+            logger.info(
+                f"[Step {step} / {num_epochs * len(train_loader)}] Worker {worker_rank} loss after expert processing: {local_loss.item():.4f}"
+            )
+            
+            train_ppl = math.exp(local_loss.item()) if local_loss.item() > 0 else float('inf')
+
+            wandb.log(
+                {
+                    "step": step,
+                    "epoch": epoch + 1,
+                    f"losses/worker_{worker_rank}_step": local_loss.item(),
+                    f"losses/worker_{worker_rank}_total_train": total_loss / (batch_idx + 1),
+                    f"ppl/worker_{worker_rank}_train": train_ppl,
+                }
+            )
+            
+            # Phase 2: Share gradients - send local gradients to all peers for averaging
+            logger.info(
+                f"[Step {step}] Phase 2: Broadcasting local gradients to all peers for averaging"
+            )
+
+            for peer_rank, peer_socket in outbound_worker_sockets.items():
+                send_message(
+                    peer_socket,
+                    (
+                        "share_gradients",
+                        step,
+                        worker_rank,
+                        local_grads,
+                    ),
+                )
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} sent gradients to worker {peer_rank}"
+                )
+            
+            # Wait for all workers to share their gradients
+            logger.info(f"[Step {step}] Waiting for gradients from all peers...")
+            while True:
+                with lock:
+                    # Clean up old gradients beyond staleness window FIRST
+                    if staleness_bound > 0:
+                        for old_step in list(grads_received.keys()):
+                            if old_step < step - staleness_bound:
+                                logger.info(f"[Step {step}] Cleaning up stale gradients from step {old_step}")
+                                grads_received.pop(old_step, None)
+                    
+                    curr_grads_len = len(grads_received[step])
+
+                logger.info(
+                    f"Worker {worker_rank} - Epoch {epoch + 1}/{num_epochs}, Step {step}/{num_epochs * len(train_loader)}: Received gradients from {curr_grads_len - 1}/{NUM_WORKERS - 1} peers (total: {curr_grads_len}/{NUM_WORKERS})."
+                )
+                if curr_grads_len < NUM_WORKERS:
+                    logger.info(f"Waiting for more gradients for step {step}...")
+                    step_event.wait(timeout=1.0)
+                    step_event.clear()
+                else:
+                    break
+
+            # Average gradients and update model
+            if len(grads_received[step]) != 0:
+                logger.info(
+                    f"[Step {step}  / {num_epochs * len(train_loader)}] Averaging gradients from {len(grads_received[step])} participants"
+                )
+
+                # Reduce the grads
+                grads_reduced = reduce(grads_received[step], len(grads_received[step]))
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} averaged gradients successfully"
+                )
+
+                # Scatter-reduce: broadcast averaged gradients to all peers via outbound connections
+                for peer_rank, peer_socket in outbound_worker_sockets.items():
+                    send_message(
+                        peer_socket,
+                        (
+                            "all_reduce",
+                            step,
+                            worker_rank,
+                            grads_reduced,
+                        ),
+                    )
+                    logger.info(
+                        f"[Step {step}] Worker {worker_rank} sent averaged gradients to worker {peer_rank}"
+                    )
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} scatter-reduce complete"
+                )
+
+                # Wait for reduced gradients from all peers (for learning - shows full all-reduce flow)
+                logger.info(f"[Step {step}] Worker {worker_rank} waiting for reduced gradients from peers...")
+                while True:
+                    with lock:
+                        # Clean up old reduced gradients beyond staleness window FIRST
+                        if staleness_bound > 0:
+                            for old_step in list(reduced_grads_received.keys()):
+                                if old_step < step - staleness_bound:
+                                    logger.info(f"[Step {step}] Cleaning up stale reduced gradients from step {old_step}")
+                                    reduced_grads_received.pop(old_step, None)
+                        
+                        # Only check staleness if bounded async is enabled
+                        if staleness_bound > 0:
+                            for recv_step in list(reduced_grads_received.keys()):
+                                # Only check steps within the staleness window
+                                if recv_step >= step - staleness_bound:
+                                    step_diff = abs(recv_step - step)
+                                    
+                                    # Track staleness statistics
+                                    staleness_stats["all_reduce_step_diffs"].append(step_diff)
+                                    staleness_stats["max_step_diff"] = max(
+                                        staleness_stats["max_step_diff"], step_diff
+                                    )
+                                    if step_diff > 0:
+                                        staleness_stats["stale_gradient_count"] += 1
+                                    
+                                    if step_diff > staleness_bound:
+                                        logger.error(
+                                            f"[Step {step}] STALENESS VIOLATION in scatter-reduce: Received gradient from step {recv_step} "
+                                            f"(diff={step_diff} > bound={staleness_bound}). Training stopped."
+                                        )
+                                        raise RuntimeError(
+                                            f"Staleness bound violated in scatter-reduce: step difference {step_diff} exceeds bound {staleness_bound}"
+                                        )
+                        
+                        curr_reduced_len = len(reduced_grads_received[step])
+                    
+                    logger.info(
+                        f"[Step {step}] Worker {worker_rank} received {curr_reduced_len}/{NUM_WORKERS - 1} reduced gradient sets"
+                    )
+                    
+                    if curr_reduced_len >= NUM_WORKERS - 1:
+                        logger.info(f"[Step {step}] Worker {worker_rank} received all reduced gradients")
+                        break
+                    
+                    step_event.wait()
+                    step_event.clear()
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} applying averaged gradients to local model"
+                )
+
+                set_gradients(grads_reduced, model)
+                optimizer.step()
+
+                logger.info(
+                    f"[Step {step}] Worker {worker_rank} model updated with averaged gradients"
+                )
+                
+                
+               
+                # Cleanup old gradients beyond staleness window to free memory (only if staleness_bound > 0)
+                if staleness_bound > 0:
+                    with lock:
+                        for old_step in list(reduced_grads_received.keys()):
+                            if old_step < step - staleness_bound:
+                                logger.info(f"[Step {step}] Cleaning up stale reduced gradients from step {old_step}")
+                                reduced_grads_received.pop(old_step, None)
+                        
+                        for old_step in list(grads_received.keys()):
+                            if old_step < step - staleness_bound:
+                                logger.info(f"[Step {step}] Cleaning up stale all-gather gradients from step {old_step}")
+                                grads_received.pop(old_step, None)
+                                
+                        for old_step in list(weights_received.keys()):
+                            if old_step < step - staleness_bound:
+                                logger.info(f"[Step {step}] Cleaning up stale weights from step {old_step}")
+                                weights_received.pop(old_step, None)
+                        
+                        for old_step in list(tokens_received.keys()):
+                            if old_step < step - staleness_bound:
+                                logger.info(f"[Step {step}] Cleaning up stale tokens from step {old_step}")
+                                tokens_received.pop(old_step, None)
+                
+                # Cleanup current step data
+                reduced_grads_received.pop(step, None)
+                grads_received.pop(step, None)
+                tokens_received.pop(step, None)
+                del grads_reduced, local_grads
+                gc.collect()
+            else:
+                logger.warning(
+                    f"[Step {step}] Worker {worker_rank}: No gradients received. Skipping grad update."
+                )
+                del local_grads
+
+            # Apply gradient clipping
+            if grad_clip_norm > 0.0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip_norm
+                )
+                if step % 100 == 0:  # Log occasionally to avoid spam
+                    logger.info(
+                        f"[Step {step}] Gradient norm before clipping: {grad_norm:.4f}"
+                    )
+
+            # Step the scheduler after optimizer
+            if scheduler is not None:
+                scheduler.step()
+
+            # Clear GPU memory after optimizer step
+            clear_gpu_cache(device)
+
+            # Calculate tokens/sec
+            batch_time = time.time() - batch_start_time
+            tokens_processed = data.size(0) * data.size(1)
+            tok_per_sec = tokens_processed / batch_time if batch_time > 0 else 0
+
+            # Update batch progress bar with current metrics
+            batch_pbar.set_postfix({"lr": f"{current_lr:.2e}", "step": step, "tok/s": f"{tok_per_sec:.0f}"})
+
+            # Log training metrics
+            wandb_metrics = {
+                "step": step,
+                "epoch": epoch + 1,
+                "lr": current_lr,
+                "batch_size": batch_size,
+                f"throughput/worker_{worker_rank}_tok_per_sec": tok_per_sec,
+            }
+            
+            # Log staleness metrics if bounded async is enabled and we have data
+            if staleness_bound > 0 and step % metrics_log_interval == 0:
+                with lock:
+                    if staleness_stats["all_gather_step_diffs"]:
+                        avg_all_gather_diff = sum(staleness_stats["all_gather_step_diffs"]) / len(
+                            staleness_stats["all_gather_step_diffs"]
+                        )
+                        wandb_metrics[f"staleness/worker_{worker_rank}_all_gather_avg_step_diff"] = avg_all_gather_diff
+                    
+                    if staleness_stats["all_reduce_step_diffs"]:
+                        avg_scatter_diff = sum(staleness_stats["all_reduce_step_diffs"]) / len(
+                            staleness_stats["all_reduce_step_diffs"]
+                        )
+                        wandb_metrics[f"staleness/worker_{worker_rank}_all_reduce_avg_step_diff"] = avg_scatter_diff
+                    
+                    if staleness_stats["broadcast_weights_step_diffs"]:
+                        avg_weights_diff = sum(staleness_stats["broadcast_weights_step_diffs"]) / len(
+                            staleness_stats["broadcast_weights_step_diffs"]
+                        )
+                        wandb_metrics[f"staleness/worker_{worker_rank}_broadcast_weights_avg_step_diff"] = avg_weights_diff
+                    
+                    wandb_metrics[f"staleness/worker_{worker_rank}_max_step_diff"] = staleness_stats["max_step_diff"]
+                    wandb_metrics[f"staleness/worker_{worker_rank}_stale_gradient_count"] = staleness_stats["stale_gradient_count"]
+                    wandb_metrics[f"staleness/worker_{worker_rank}_stale_weight_count"] = staleness_stats["stale_weight_count"]
+                    wandb_metrics[f"staleness/worker_{worker_rank}_staleness_bound"] = staleness_bound
+                    
+                    # Reset stats for next interval
+                    staleness_stats["all_gather_step_diffs"] = []
+                    staleness_stats["all_reduce_step_diffs"] = []
+                    staleness_stats["broadcast_weights_step_diffs"] = []
+                    staleness_stats["stale_gradient_count"] = 0
+                    staleness_stats["stale_weight_count"] = 0
+                    # Keep max_step_diff as cumulative max
+                    
+                    logger.info(
+                        f"[Step {step}] Staleness stats - Max diff: {staleness_stats['max_step_diff']}, "
+                        f"Stale grads in interval: {staleness_stats['stale_gradient_count']}, "
+                        f"Stale weights in interval: {staleness_stats['stale_weight_count']}"
+                    )
+            
+            wandb.log(wandb_metrics)
+
+            # Log gradient norms if tracking enabled
+            if track_gradients:
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = torch.norm(param.grad.detach(), 2).item()
+                        wandb.log(
+                            {
+                                f"gradients/layer_{name}": grad_norm,
+                                "step": step,
+                                "epoch": epoch + 1,
+                            }
+                        )
+
+            # Log network metrics if tracking enabled
+            if track_network_metrics and step % metrics_log_interval == 0:
+                network_stats = get_network_metrics(reset=True)
+                if network_stats:
+                    wandb.log(
+                        {
+                            f"network/worker_{worker_rank}_send_bandwidth_mbps": network_stats.get(
+                                "send_bandwidth_mbps", 0
+                            ),
+                            f"network/worker_{worker_rank}_recv_bandwidth_mbps": network_stats.get(
+                                "recv_bandwidth_mbps", 0
+                            ),
+                            f"network/worker_{worker_rank}_avg_send_latency_ms": network_stats.get(
+                                "avg_send_latency_ms", 0
+                            ),
+                            f"network/worker_{worker_rank}_avg_recv_latency_ms": network_stats.get(
+                                "avg_recv_latency_ms", 0
+                            ),
+                            f"network/worker_{worker_rank}_avg_buffer_size_kb": network_stats.get(
+                                "avg_buffer_size_kb", 0
+                            ),
+                            f"network/worker_{worker_rank}_max_buffer_size_kb": network_stats.get(
+                                "max_buffer_size_kb", 0
+                            ),
+                            "step": step,
+                            "epoch": epoch + 1,
+                        }
+                    )
+                    logger.info(
+                        f"[Worker {worker_rank} Step {step}] Network: Send={network_stats.get('send_bandwidth_mbps', 0):.2f}Mbps, "
+                        f"Recv={network_stats.get('recv_bandwidth_mbps', 0):.2f}Mbps"
+                    )
+
+            # Evaluation
+            if step % eval_steps == 0:
+                val_loss, val_ppl = evaluate(
+                    device,
+                    model,
+                    val_loader,
+                    criterion,
+                    decoder_type_ppl=decoder_type_ppl,
+                )
+
+                if decoder_type_ppl:
+                    wandb.log(
+                        {
+                            "step": step,
+                            "epoch": epoch + 1,
+                            "losses/val": val_loss,
+                            "ppl/val": val_ppl,
+                        }
+                    )
+                    eval_msg = f"[Step {step}] Evaluation: Val Loss={val_loss:.4f}, Val PPL={val_ppl:.2f}"
+                    logger.info(eval_msg)
+
+                    # Update progress bar
+                    batch_pbar.set_postfix(
+                        {"val_loss": f"{val_loss:.4f}", "ppl": f"{val_ppl:.2f}"}
+                    )
+                else:
+                    wandb.log(
+                        {
+                            "step": step,
+                            "epoch": epoch + 1,
+                            "losses/val": val_loss,
+                        }
+                    )
+                    eval_msg = f"[Step {step}] Evaluation: Val Loss={val_loss:.4f}"
+                    logger.info(eval_msg)
+
+                    # Update progress bar
+                    batch_pbar.set_postfix({"val_loss": f"{val_loss:.4f}"})
+
+            # Save checkpoint at regular intervals
+            if save_checkpoints and should_save_checkpoint(
+                step, epoch, checkpoint_steps, num_epochs * len(train_loader)
+            ):
+                # Wrap model_layers in Sequential for proper state_dict saving
+
+                checkpoint_manager.save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,  # Save scheduler state
+                    step=step,
+                    epoch=epoch,
+                    loss=None,
+                    metadata={
+                        "val_loss": val_loss
+                        if step % eval_steps == 0 and step != 0
+                        else None,
+                        "learning_rate": current_lr,
+                    },
+                )
+                logger.info(f"[Step {step}] Checkpoint saved")
+
+                # Clean up activations tensor
+                if activations is not None:
+                    del activations
+
+            gc.collect()
+            activations = None
+
+        # Close batch progress bar for this epoch
+        batch_pbar.close()
+
+    for worker_addr, worker_socket in workers.items():
+        send_message(worker_socket, ("down", step, worker_rank, None))
+        logger.info(f"Sent shutdown signal to worker at {worker_addr}")
+
+    for peer_rank, peer_socket in outbound_worker_sockets.items():
+        try:
+            peer_socket.close()
+            logger.info(f"Closed outbound socket to worker rank {peer_rank}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to close outbound socket to worker rank {peer_rank}: {e}"
+            )
+
+    logger.info("Training completed successfully!")

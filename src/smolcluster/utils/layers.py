@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 from safetensors import safe_open
@@ -164,8 +164,7 @@ def get_model_per_node(
 
     assert local_rank < num_nodes, "Local rank must be less than number of nodes"
 
-    # if model_name == 'causal_gpt2':
-
+   
     # Collect all transformer layers
     layers = list(model.blocks)
 
@@ -214,3 +213,24 @@ def get_model_per_node(
     final_model = torch.nn.ModuleList(list(out_layers.values()))
 
     return final_model, out_layers
+
+
+def get_expert_per_node(local_rank: int, num_nodes: int, num_experts:  int) -> List[int]:
+    
+    assert local_rank < num_nodes, "local rank must be less than number of total nodes"
+    
+    expert_indices = torch.arange(num_experts)
+    split_indices = torch.chunk(expert_indices, num_nodes)
+    logger.info(f"Expert splits: {split_indices}")
+    
+    node_expert_indices = split_indices[local_rank].tolist()
+    
+    # out_experts = {}
+    
+    # for idx in node_expert_indices:
+    #     out_experts[f"expert_{idx}"] = expert_model
+        
+        
+    return node_expert_indices
+    
+    
