@@ -346,33 +346,22 @@ def run_worker(
         f"Data ready. Train size: {len(train_loader)}, Val size: {len(val_loader)}"
     )
 
+    # Get device before model creation
+    device = get_device()
+
     # Create model
     if algorithm == 'ep':
-        # Expert Parallelism uses Mixtral (MoE) model
+        # EP: create the Mixtral transformer (last rank will use it; get_model_per_node handles assignment)
         model = Mixtral(
             vocab_size=vocab_size,
-            embedding_dims=gpt_config["embedding_dims"],
-            num_experts=gpt_config["num_experts"],
-            top_k=gpt_config["top_k"],
-            num_layers=gpt_config["num_layers"],
-            num_heads=gpt_config["num_heads"],
-            max_seq_len=gpt_config["max_seq_len"],
-            dropout=gpt_config["dropout"],
-            use_flash_attention=gpt_config.get("use_flash_attention", False),
+            embeddings_dims=gpt_config["embedding_dims"],
+            no_of_heads=gpt_config.get("no_of_heads", gpt_config.get("num_heads", 12)),
+            no_of_decoder_layers=gpt_config["num_layers"],
+            device=device,
+            attn_dropout=gpt_config.get("attn_dropout", 0.1),
+            dropout=gpt_config.get("dropout", 0.1),
         )
-    else:
-        # Other algorithms use BaseTransformer (GPT-2)
-        model = BaseTransformer(
-            vocab_size=vocab_size,
-            max_seq_len=gpt_config["max_seq_len"],
-            model_dim=gpt_config["model_dim"],
-            num_layers=gpt_config["num_layers"],
-            num_heads=gpt_config["num_heads"],
-            ff_dim=gpt_config["ff_dim"],
-            dropout=gpt_config["dropout"],
-        )
-    
-    device = get_device()
+   
     
     # For FSDP Stage 3 and EP, skip moving full model to device
     # Model sharding happens later on CPU or per-worker
@@ -584,7 +573,7 @@ def run_worker(
         # Expert Parallelism: Each worker processes tokens for its assigned experts
         run_ep_worker(
             model=model,
-            train_loader=train_loader if local_rank == 0 else None,  # Only rank 0 needs dataloader
+            train_loader=train_loader,
             val_loader=val_loader if local_rank == 0 else None,  # Only rank 0 needs val loader
             config=gpt_config,
             cluster_config=cluster_config,
@@ -671,9 +660,9 @@ def main():
         sys.exit(1)
 
     # Validate algorithm
-    if algorithm not in ["edp", "syncps", "mp", "mp_pipeline", "classicdp", "fsdp"]:
+    if algorithm not in ["edp", "syncps", "mp", "mp_pipeline", "classicdp", "fsdp", "ep"]:
         print(
-            f"Error: Invalid algorithm '{algorithm}'. Must be 'edp', 'syncps', 'mp', 'mp_pipeline', 'classicdp', or 'fsdp'"
+            f"Error: Invalid algorithm '{algorithm}'. Must be 'edp', 'syncps', 'mp', 'mp_pipeline', 'classicdp', 'fsdp', or 'ep'"
         )
         sys.exit(1)
 

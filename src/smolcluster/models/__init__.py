@@ -4,7 +4,6 @@ from .moe import (
     LayerNormalization,
     MHA,
     Mixtral,
-    MoeLayer,
     RotaryEmbeddings,
     SWiGLUExpertMoE,
     Swish,
@@ -20,7 +19,6 @@ __all__ = [
     "BaseTransformer",
     "BaseTransformerBlock",
     "Mixtral",
-    "MoeLayer",
     "SWiGLUExpertMoE",
     "TransformerDecoderBlock",
     "MHA",
@@ -30,6 +28,5 @@ __all__ = [
     "LayerNormalization",
     "Swish",
     "ExpertBlock",
-    "Router"
-    
+    "Router",
 ]

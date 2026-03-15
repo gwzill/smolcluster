@@ -15,18 +15,23 @@ from smolcluster.utils.data import get_data_indices
 
 TOKEN = os.getenv("HF_TOKEN")
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", token=TOKEN)
-
-tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-
-
-class ModelArgs:
-    block_size = 128
+def _build_tokenizer(config):
+    tokenizer_name = config.get("tokenizer", "openai-community/gpt2")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, token=TOKEN)
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+    return tokenizer
 
 
 def prepare_dataset(
     config, world_size: int, seed: int, rank: int, batch_size: int = None
 ):
+    tokenizer = _build_tokenizer(config)
+    block_size = int(config.get("max_seq_len", 128))
+
     def collate_fn(batch):
         # Extract text data
         texts = batch  # batch is list of strings
@@ -34,7 +39,7 @@ def prepare_dataset(
         input_encodings = tokenizer(
             texts,
             padding="max_length",
-            max_length=ModelArgs.block_size,
+            max_length=block_size,
             truncation=True,
             return_tensors="pt",
         )

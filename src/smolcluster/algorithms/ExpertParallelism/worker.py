@@ -6,7 +6,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torchinfo
@@ -14,7 +14,6 @@ import wandb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from smolcluster.models.moe import ExpertBlock, Mixtral, Router, TextEmbeddings
 from smolcluster.utils.checkpointing import CheckpointManager, should_save_checkpoint
 from smolcluster.utils.common_utils import (
     get_gradients,
@@ -57,7 +56,7 @@ def compute_leader_activations(
     
     return out
 
-def get_expert_probs_and_indices(model: torch.nn.ModuleList, router: Router, data: torch.Tensor, local_rank: int) -> tuple[torch.Tensor, torch.Tensor]:
+def get_expert_probs_and_indices(model: torch.nn.ModuleList, router: torch.nn.Module, data: torch.Tensor, local_rank: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Get expert probabilities and indices from the router."""
     
     if local_rank == 0:
@@ -68,31 +67,6 @@ def get_expert_probs_and_indices(model: torch.nn.ModuleList, router: Router, dat
     
     return expert_probs, expert_indices
     
-
-def evaluate(
-    device: torch.device,
-    model: torch.nn.Module,
-    val_loader: DataLoader,
-    criterion: torch.nn.Module,
-    decoder_type_ppl: bool = False,
-) -> tuple[float, float]:
-    """Evaluate model on validation set."""
-    model.eval()
-    total_val_loss = 0.0
-
-    with torch.no_grad():
-        for data, target in val_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            B, T, C = output.shape
-            output = output.view(B * T, C)
-            target = target.view(B * T)
-            loss = criterion(output, target)
-            total_val_loss += loss.item()
-    avg_loss = total_val_loss / len(val_loader)
-    ppl = math.exp(avg_loss) if decoder_type_ppl else None
-
-    return avg_loss, ppl
 
 
 def clear_gpu_cache(device: torch.device) -> None:
@@ -178,6 +152,8 @@ def handle_worker(
     step_event: threading.Event,
     lock: threading.Lock,
     weights_received: dict,
+    activations_received: dict,
+    eval_losses_received: dict,
 ) -> None:
     """Handle individual worker connections and gradient reception."""
     logger.info(f"Handling worker at {addr}")
@@ -198,9 +174,9 @@ def handle_worker(
 
             if command == "route_tokens":
                 logger.info(
-                    f"Received message '{command}' from worker {addr} (rank {rank}) for step {recv_step}"
+                    f"Received message '{command}' from worker {addr} (for destination rank {rank}) for step {recv_step}"
                 )
-                logger.info(f"[Step {recv_step}] Storing routed tokens from worker {rank}")
+                logger.info(f"[Step {recv_step}] Storing routed tokens for worker {rank}")
 
                 with lock:
                     tokens_received[recv_step][rank] = data
@@ -210,23 +186,9 @@ def handle_worker(
 
                 step_event.set()
             
-            elif command == "share_gradients":
+            elif command == "parameter_server_reduce":
                 logger.info(
-                    f"Received message '{command}' from worker {addr} (rank {rank}) for step {recv_step}"
-                )
-                logger.info(f"[Step {recv_step}] Storing gradients from worker {rank}")
-
-                with lock:
-                    grads_received[recv_step][rank] = data
-                    logger.info(
-                        f"[Step {recv_step}] Now have {len(grads_received[recv_step])} gradient sets"
-                    )
-
-                step_event.set()
-
-            elif command == "all_reduce":
-                logger.info(
-                    f"[Step {recv_step}] Received reduced gradients from worker {rank}"
+                    f"[Step {recv_step}] Received '{command}' gradients from worker {rank}"
                 )
                 
                 # Buffer gradients by step - handle out-of-order delivery
@@ -239,21 +201,24 @@ def handle_worker(
                 
                 step_event.set()
 
-            elif command == "broadcast_weights":
+
+            elif command == "return_activations":
                 logger.info(
-                    f"Received broadcast weights message from worker {addr} (rank {rank})"
+                    f"[Step {recv_step}] Received expert activations from worker {rank}"
                 )
-                # Handle any broadcast messages if needed
-                
-                 # Buffer weights by step - handle out-of-order delivery
                 with lock:
-                    weights_received[recv_step][rank] = data
+                    activations_received[recv_step][rank] = data
                     logger.info(
-                        f"[Step {recv_step}] Buffered weights from worker {rank}. "
-                        f"Now have {len(weights_received[recv_step])} weight sets for this step"
+                        f"[Step {recv_step}] Buffered activations from worker {rank}. "
+                        f"Now have {len(activations_received[recv_step])} activation sets for this step"
                     )
-                
                 step_event.set()
+
+            elif command == "eval_loss":
+                with lock:
+                    eval_losses_received[recv_step][rank] = data
+                step_event.set()
+
             elif command == "down":
                 logger.info(f"Worker {addr} requested shutdown")
                 break
@@ -274,6 +239,8 @@ def accept_workers(
     grads_received: dict,
     reduced_grads_received: dict,
     weights_received: dict,
+    activations_received: dict,
+    eval_losses_received: dict,
     step_event: threading.Event,
     lock: threading.Lock,
 ) -> None:
@@ -311,6 +278,8 @@ def accept_workers(
                         step_event,
                         lock,
                         weights_received,
+                        activations_received,
+                        eval_losses_received,
                     ),
                     daemon=True,
                 ).start()
@@ -326,45 +295,247 @@ def accept_workers(
 
     logger.info("All workers connected. Starting training...")
 
-def route_tokens(expert_probs: torch.Tensor, expert_indices: torch.Tensor, num_experts: int, expert_shard: list, data: torch.Tensor) -> Tuple[Dict[int, torch.Tensor], Dict[int, int]]:
-    """Route tokens to experts based on router output.
-    
-    Args:
-        expert_probs: Probabilities for each expert [batch_size, seq_len, top_k]
-        expert_indices: Indices of selected experts [batch_size, seq_len, top_k]
-        num_experts: Total number of experts
-        expert_shard: List of expert indices assigned to this node
-        data: Input token data [batch_size, seq_len, ...]
-    
-    Returns:
-        Tuple of (selected_tokens dict, usage_counts dict)
-        - selected_tokens: {expert_idx: tokens} for experts in expert_shard
-        - usage_counts: {expert_idx: num_tokens} for all experts (0 if not selected)
-    """
+def route_tokens(
+    expert_probs: torch.Tensor,
+    expert_indices: torch.Tensor,
+    num_experts: int,
+    expert_shard: list,
+    data: torch.Tensor,
+) -> Tuple[Dict[int, torch.Tensor], Dict[int, int]]:
+    """Route tokens to per-expert buckets.
 
+    Args:
+        expert_probs:   [batch, seq, top_k] routing probabilities
+        expert_indices: [batch, seq, top_k] selected expert indices
+        num_experts:    total number of experts
+        expert_shard:   expert indices assigned to this node
+        data:           activations to route [batch, seq, embedding_dims]
+
+    Returns:
+        selected_tokens: {expert_idx: Tensor[num_selected, embedding_dims]}
+        usage_counts:    {expert_idx: num_selected} for all experts
+    """
     selected_tokens = {}
     usage_counts = {i: 0 for i in range(num_experts)}
 
-    # Route to experts
     for expert_idx in range(num_experts):
-        # Create mask for current expert across all top_k positions
         expert_mask = expert_indices == expert_idx
-
-        # Sum probabilities for current expert
-        expert_weights = (expert_probs * expert_mask).sum(dim=-1)  # [batch_size, seq_len]
-
-        # Get inputs where expert is used
+        expert_weights = (expert_probs * expert_mask).sum(dim=-1)  # [batch, seq]
         selected = expert_weights > 0
-        num_selected = selected.sum().item()
-        
-        # Track usage for all experts (for global statistics)
+        num_selected = int(selected.sum().item())
         usage_counts[expert_idx] = num_selected
-        
-        # Only store tokens for experts assigned to this node's shard
         if expert_idx in expert_shard and num_selected > 0:
             selected_tokens[expert_idx] = data[selected]
-                
+
     return selected_tokens, usage_counts
+
+
+def compute_expert_contributions(
+    peer_tokens: Dict[int, torch.Tensor],
+    expert_probs: torch.Tensor,
+    expert_indices: torch.Tensor,
+    expert_shard_indices: list,
+    local_experts: torch.nn.ModuleDict,
+    embedding_dims: int,
+    batch_size: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Run routed tokens through local expert blocks and scatter into a contribution tensor.
+
+    Each selected token is passed through its assigned expert in full (all embedding_dims),
+    weighted by the routing probability, and scattered back into the output tensor.
+
+    Args:
+        peer_tokens:          {expert_idx: Tensor[num_selected, embedding_dims]} from route_tokens
+        expert_probs:         [batch, seq, top_k]
+        expert_indices:       [batch, seq, top_k]
+        expert_shard_indices: list of expert indices owned by this worker
+        local_experts:        nn.ModuleDict {str(expert_idx): ExpertBlock}
+        embedding_dims:       full hidden dimension
+        batch_size, seq_len:  shape of the original activation batch
+        device:               device for output tensor
+
+    Returns:
+        contribution: Tensor[batch, seq, embedding_dims]
+    """
+    contribution = torch.zeros(batch_size, seq_len, embedding_dims, device=device)
+
+    for expert_idx in expert_shard_indices:
+        if expert_idx not in peer_tokens:
+            continue
+        expert_mask = expert_indices == expert_idx
+        expert_weights = (expert_probs * expert_mask).sum(dim=-1)  # [batch, seq]
+        selected = expert_weights > 0  # [batch, seq] - tokens routed to this expert
+        if not selected.any():
+            continue
+        expert_input = peer_tokens[expert_idx].to(device)          # [n_sel, embedding_dims]
+        expert_out = local_experts[str(expert_idx)](expert_input)  # [n_sel, embedding_dims]
+        contribution[selected] += expert_out * expert_weights[selected].unsqueeze(-1)
+
+    return contribution
+
+
+def run_distributed_eval_step(
+    *,
+    step: int,
+    worker_rank: int,
+    num_nodes: int,
+    num_experts: int,
+    num_workers: int,
+    device: torch.device,
+    val_loader,
+    val_iter,
+    text_embeddings,
+    router,
+    expert_shard_indices: list,
+    local_experts: torch.nn.ModuleDict,
+    embedding_dims: int,
+    mixtral,
+    criterion: torch.nn.Module,
+    outbound_worker_sockets: dict,
+    tokens_received: dict,
+    activations_received: dict,
+    eval_losses_received: dict,
+    lock: threading.Lock,
+    step_event: threading.Event,
+) -> Tuple[Optional[float], Any]:
+    """Run one distributed EP validation step and return (val_loss, val_iter)."""
+    if val_loader is None:
+        return None, val_iter
+
+    eval_step = ("eval", step)
+
+    if worker_rank == 0:
+        if val_iter is None:
+            val_iter = iter(val_loader)
+        try:
+            eval_data, eval_target = next(val_iter)
+        except StopIteration:
+            val_iter = iter(val_loader)
+            eval_data, eval_target = next(val_iter)
+
+        eval_data = eval_data.to(device)
+        eval_target = eval_target.to(device)
+
+        with torch.no_grad():
+            eval_token_activations = text_embeddings(eval_data)
+            eval_probs, eval_indices = router(eval_token_activations)
+
+        for peer_rank in range(num_workers):
+            peer_expert_indices = get_expert_per_node(peer_rank, num_nodes, num_experts)
+            peer_eval_tokens, _ = route_tokens(
+                eval_probs,
+                eval_indices,
+                num_experts,
+                peer_expert_indices,
+                eval_token_activations,
+            )
+
+            payload = {
+                "tokens": peer_eval_tokens,
+                "expert_probs": eval_probs,
+                "expert_indices": eval_indices,
+                "target": eval_target,
+            }
+
+            if peer_rank == 0:
+                with lock:
+                    tokens_received[eval_step][worker_rank] = payload
+            else:
+                peer_socket = outbound_worker_sockets[peer_rank]
+                send_message(
+                    peer_socket,
+                    ("route_tokens", eval_step, peer_rank, payload),  # Use destination rank
+                )
+    else:
+        while True:
+            with lock:
+                has_eval_tokens = worker_rank in tokens_received[eval_step]
+            if has_eval_tokens:
+                break
+            step_event.wait()
+            step_event.clear()
+
+    eval_token_data = tokens_received[eval_step][worker_rank]
+    eval_peer_tokens = eval_token_data["tokens"]
+    eval_probs = eval_token_data["expert_probs"].to(device)
+    eval_indices = eval_token_data["expert_indices"].to(device)
+    eval_target = eval_token_data["target"].to(device)
+    eval_batch_size, eval_seq_len, _ = eval_probs.shape
+
+    with torch.no_grad():
+        eval_contribution = compute_expert_contributions(
+            peer_tokens=eval_peer_tokens,
+            expert_probs=eval_probs,
+            expert_indices=eval_indices,
+            expert_shard_indices=expert_shard_indices,
+            local_experts=local_experts,
+            embedding_dims=embedding_dims,
+            batch_size=eval_batch_size,
+            seq_len=eval_seq_len,
+            device=device,
+        )
+
+    if worker_rank != num_nodes - 1:
+        last_rank_socket = outbound_worker_sockets[num_nodes - 1]
+        send_message(
+            last_rank_socket,
+            ("return_activations", eval_step, worker_rank, eval_contribution.detach().cpu()),
+        )
+    else:
+        with lock:
+            activations_received[eval_step][worker_rank] = eval_contribution
+
+    if worker_rank == num_nodes - 1:
+        while True:
+            with lock:
+                curr_eval_act_len = len(activations_received[eval_step])
+            if curr_eval_act_len >= num_nodes:  # Wait for all nodes including self
+                break
+            step_event.wait()
+            step_event.clear()
+
+        with torch.no_grad():
+            eval_aggregated = torch.zeros(
+                eval_batch_size, eval_seq_len, embedding_dims, device=device
+            )
+            with lock:
+                for rank_contrib in activations_received[eval_step].values():
+                    eval_aggregated += rank_contrib.to(device)
+
+            eval_output = mixtral(eval_aggregated)
+            B, T, C = eval_output.shape
+            eval_output = eval_output.view(B * T, C)
+            eval_target_flat = eval_target.view(B * T)
+            eval_loss_tensor = criterion(eval_output, eval_target_flat)
+            eval_loss_value = float(eval_loss_tensor.item())
+
+        for peer_rank, peer_socket in outbound_worker_sockets.items():
+            send_message(
+                peer_socket,
+                ("eval_loss", eval_step, worker_rank, eval_loss_value),
+            )
+
+        with lock:
+            eval_losses_received[eval_step][worker_rank] = eval_loss_value
+
+    while True:
+        with lock:
+            has_eval_loss = (num_nodes - 1) in eval_losses_received[eval_step]
+        if has_eval_loss:
+            break
+        step_event.wait()
+        step_event.clear()
+
+    with lock:
+        val_loss = eval_losses_received[eval_step][num_nodes - 1]
+
+    tokens_received.pop(eval_step, None)
+    activations_received.pop(eval_step, None)
+    eval_losses_received.pop(eval_step, None)
+
+    return val_loss, val_iter
 
 
 def run_ep_worker(
@@ -416,14 +587,12 @@ def run_ep_worker(
     eval_steps = config["eval_steps"]
     num_experts = config["num_experts"]
     track_gradients = config["track_gradients"]
-    decoder_type_ppl = config.get("decoder_type", {}).get("ppl", False)
     learning_rate = config["learning_rate"]
     embedding_dims = config["embedding_dims"]
     grad_clip_norm = config.get("grad_clip_norm", 0.0)
     top_k = config["top_k"]
     num_layers = config["num_layers"]
     noisy_topk = config.get("noisy_topk", False)
-    vocab_size = config["vocab_size"]
     
     staleness_bound = cluster_config.get("staleness_bound", 0)  # 0 = strict sync, >0 = bounded async
     NUM_WORKERS = cluster_config["num_workers"]
@@ -471,6 +640,8 @@ def run_ep_worker(
     grads_received = defaultdict(dict)
     reduced_grads_received = defaultdict(dict)  # Buffer for scatter-reduce gradients
     weights_received = defaultdict(dict)  # Buffer for broadcast weights
+    activations_received = defaultdict(dict)  # Buffer for expert activations from all workers (last rank)
+    eval_losses_received = defaultdict(dict)  # Buffer for eval losses broadcast from last rank
     num_nodes = cluster_config["num_nodes"]
     
     # Expert usage tracking
@@ -482,74 +653,57 @@ def run_ep_worker(
     else:
         logger.info("Gradient clipping disabled")
 
-    # Load model
-    model = model.to(device)
-    logger.info(f"Model initialized on device: {device}")
-    
-    #Get the expert for this node
-    
-    expert_shard_indices = get_expert_per_node(worker_rank, num_nodes, num_experts)
-    
-    logger.info(f"Worker rank {worker_rank} assigned experts: {expert_shard_indices}")
-    logger.info(f"Expert partitioning across all {num_nodes} nodes:")
-    for rank in range(num_nodes):
-        rank_experts = get_expert_per_node(rank, num_nodes, num_experts)
-        logger.info(f"  Rank {rank}: experts {rank_experts}")
-    
-    router = Router(
-        embeddings_dims=embedding_dims,
-        num_experts=num_experts,
-        top_k=top_k,
-        device=device,
-        noisy_topk=noisy_topk
-    )
-    
-
-    # Load model
-    model = model.to(device)
-    logger.info(f"Model initialized on device: {device}")
-    
-    sharded_model, out_layers  = get_model_per_node(
+    # Initialize EP model components for this rank via get_model_per_node
+    _, ep_layers = get_model_per_node(
         model=model,
         num_nodes=num_nodes,
         local_rank=worker_rank,
         total_layers=num_layers,
-        model_type='causal_mixtral'
-            
+        model_type="causal_mixtral",
+        num_experts=num_experts,
+        model_config={
+            "top_k": top_k,
+            "device": device,
+            "noisy_topk": noisy_topk,
+        },
     )
+    expert_shard_indices = get_expert_per_node(worker_rank, num_nodes, num_experts)
+    local_experts = torch.nn.ModuleDict({
+        str(idx): ep_layers[f"model.expert_{idx}"] for idx in expert_shard_indices
+    })
+    text_embeddings = ep_layers.get("model.text_embeddings")
+    router          = ep_layers.get("model.router")
+    mixtral         = ep_layers.get("model.mixtral")
 
-    model_layers = out_layers
-    
-    
-    logger.info(f"Worker rank {worker_rank} loaded {len(model_layers)} experts for this node")
-   
-    
-    optimizer = torch.optim.AdamW(out_layers.values(), lr=learning_rate)
-    logger.info(
-        f"Created optimizer for worker rank {worker_rank} with lr={learning_rate}"
-    )
+    logger.info(f"Worker rank {worker_rank} assigned experts: {expert_shard_indices}")
+    logger.info(f"Expert partitioning across all {num_nodes} nodes:")
+    for rank in range(num_nodes):
+        logger.info(f"  Rank {rank}: experts {get_expert_per_node(rank, num_nodes, num_experts)}")
+    logger.info(f"Worker rank {worker_rank} model components initialized on device: {device}")
 
-    
-    # Log model summary
-    model_summary = str(torchinfo.summary(model, verbose=0, device=device))
-    logger.info("Model Summary:")
+    # Build optimizer over this worker's trainable parameters
+    trainable_params = list(local_experts.parameters())
+    if worker_rank == 0:
+        trainable_params += (list(router.parameters()) + list(text_embeddings.parameters()))
+    if worker_rank == num_nodes - 1 and mixtral is not None:
+        trainable_params += list(mixtral.parameters())
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate)
+    logger.info(f"Created optimizer for worker rank {worker_rank} with lr={learning_rate}")
+
+    # Log model summary for local expert blocks
+    model_summary = str(torchinfo.summary(local_experts, verbose=0, device=device))
+    logger.info("Local Expert Blocks Summary:")
     logger.info(model_summary)
     wandb.log({"model_structure": model_summary})
 
-    # Load model layers for this worker rank
     config["num_layers"] = cluster_config["num_layers"]
-    logger.info(f"Loading worker rank {worker_rank}'s share of model layers...")
-
-    model = model.to(device)
-    logger.info(
-        f"Worker rank {worker_rank} loaded model layers and moved to device: {device}"
-    )
 
     
 
     # Learning rate scheduler setup (after optimizer creation)
     use_lr_scheduler = config.get("use_lr_scheduler", False)
-    total_steps = num_epochs * len(train_loader)
+    total_steps = num_epochs * (len(train_loader) if train_loader is not None else 0)
     scheduler = None
     if use_lr_scheduler:
         warmup_iters = config["warmup_iters"]
@@ -580,7 +734,7 @@ def run_ep_worker(
 
             metadata = checkpoint_manager.load_checkpoint(
                 checkpoint_path=checkpoint_path,
-                model=model,
+                model=local_experts,
                 optimizer=optimizer if save_optimizer_state else None,
                 scheduler=scheduler,  # Load scheduler state if it exists
                 device=device,
@@ -662,18 +816,32 @@ def run_ep_worker(
         grads_received=grads_received,
         reduced_grads_received=reduced_grads_received,
         weights_received=weights_received,
+        activations_received=activations_received,
+        eval_losses_received=eval_losses_received,
         step_event=step_event,
-        lock=lock
+        lock=lock,
     )
 
     logger.info(f"All workers connected. Starting training for {num_epochs} epochs.")
+
+    steps_per_epoch = len(train_loader) if train_loader is not None else 0
+    if steps_per_epoch == 0:
+        raise ValueError("run_ep_worker requires a non-empty train_loader on all ranks")
+
+    val_iter = None
 
     for epoch in range(start_epoch, num_epochs):
         total_loss = 0.0
         val_loss = None #to make the ckpt manager happy at the end of the epoch when it tries to save the checkpoint and log the val_loss in the metadata
         
-        model.train()
-
+        local_experts.train()
+        
+        if worker_rank == 0 and text_embeddings is not None:
+            text_embeddings.train()
+        if worker_rank == num_nodes - 1 and mixtral is not None:
+            mixtral.train()
+            mixtral = mixtral.to(device)
+        
         global step  # Declare step as global to modify the global step counter
 
         logger.info(f"Starting epoch {epoch + 1}/{num_epochs}")
@@ -683,7 +851,7 @@ def run_ep_worker(
             # Create batch progress bar for this epoch (only for rank 0)
             batch_pbar = tqdm(
                 enumerate(train_loader),
-                total=len(train_loader),
+                total=steps_per_epoch,
                 desc=f"Epoch {epoch + 1}/{num_epochs}",
                 leave=True,
                 ncols=120,
@@ -691,11 +859,11 @@ def run_ep_worker(
             batch_iterator = batch_pbar
         else:
             # Other workers wait for tokens from rank 0
-            batch_iterator = enumerate(range(len(train_loader)))
+            batch_iterator = enumerate(range(steps_per_epoch))
             logger.info(f"Worker {worker_rank} waiting for tokens from rank 0")
 
         for batch_idx, batch_data in batch_iterator:
-            step = epoch * len(train_loader) + batch_idx
+            step = epoch * steps_per_epoch + batch_idx
 
             # Skip batches if resuming mid-epoch
             if step < start_step:
@@ -709,46 +877,51 @@ def run_ep_worker(
             else:
                 current_lr = learning_rate
 
-            activations = None
 
             # Only rank 0 loads data and runs router
             if worker_rank == 0:
                 data, target = batch_data
                 data = data.to(device)
                 target = target.to(device)
-                
+
                 logger.info(
-                    f"[Step {step}/{num_epochs * len(train_loader)}] Rank 0 running router to determine token routing"
+                    f"[Step {step}/{num_epochs * steps_per_epoch}] Rank 0 computing embeddings and routing"
                 )
 
-                # Run router to determine which tokens go to which experts
-                expert_probs, expert_indices = get_expert_probs_and_indices(sharded_model, router, data, worker_rank)
-                
-                # Phase 1: Route tokens - send tokens to appropriate workers based on expert assignment
+                # Compute token embeddings (rank 0 only)
+                token_activations = text_embeddings(data)  # [batch, seq, embedding_dims]
+
+                # Route based on activations
+                expert_probs, expert_indices = router(token_activations)
+
+                # Phase 1: Route activations to workers based on expert assignment
                 logger.info(
-                    f"[Step {step}] Phase 1: Rank 0 routing tokens to workers based on expert assignments"
+                    f"[Step {step}] Phase 1: Rank 0 routing activations to workers based on expert assignments"
                 )
-                
+
                 # Track global expert usage (from rank 0's perspective)
                 global_usage_counts = {i: 0 for i in range(num_experts)}
-                
-                # Determine which tokens go to which worker's experts
+                routing_summary = []
+
+                # Determine which activations go to which worker's experts
                 for peer_rank in range(NUM_WORKERS):
-                    peer_expert_indices = get_expert_per_node(peer_rank, NUM_WORKERS, num_experts)
-                    peer_routed_tokens, usage_counts = route_tokens(expert_probs, expert_indices, num_experts, peer_expert_indices, data)
+                    peer_expert_indices = get_expert_per_node(peer_rank, num_nodes, num_experts)
+                    peer_routed_tokens, usage_counts = route_tokens(expert_probs, expert_indices, num_experts, peer_expert_indices, token_activations)
                     
                     # Accumulate usage counts for this step
                     for expert_idx, count in usage_counts.items():
                         global_usage_counts[expert_idx] += count
                         expert_usage_counts[expert_idx] += count
                     
+                    # Log warning if no tokens routed, but still send message to avoid deadlock
                     if len(peer_routed_tokens) == 0:
                         logger.warning(f"[Step {step}] No tokens routed to worker {peer_rank} (experts {peer_expert_indices})")
                         continue
-                        # Store local tokens
-                    elif peer_rank == 0:
+                    
+                    # Store local tokens
+                    if peer_rank == 0:
                         with lock:
-                            tokens_received[step][worker_rank] = {
+                            tokens_received[step][peer_rank] = {
                                 'tokens': peer_routed_tokens,
                                 'expert_probs': expert_probs,
                                 'expert_indices': expert_indices,
@@ -762,7 +935,7 @@ def run_ep_worker(
                             (
                                 "route_tokens",
                                 step,
-                                worker_rank,
+                                peer_rank,  # Use destination rank, not sender rank
                                 {
                                     'tokens': peer_routed_tokens,
                                     'expert_probs': expert_probs,
@@ -774,9 +947,22 @@ def run_ep_worker(
                         logger.info(
                             f"[Step {step}] Rank 0 sent tokens for experts {peer_expert_indices} to worker {peer_rank}"
                         )
+
+                    per_expert_counts = {
+                        int(expert_idx): int(tokens.shape[0])
+                        for expert_idx, tokens in peer_routed_tokens.items()
+                    }
+                    routing_summary.append(
+                        f"rank={peer_rank} assigned={peer_expert_indices} "
+                        f"active={sorted(list(peer_routed_tokens.keys()))} "
+                        f"token_counts={per_expert_counts} total_tokens={sum(per_expert_counts.values())}"
+                    )
                 
                 # Log expert usage for this step (only rank 0 has full view)
                 logger.info(f"[Step {step}] Expert usage this step: {global_usage_counts}")
+                logger.info(
+                    f"[Step {step}] Routing summary | " + " ; ".join(routing_summary)
+                )
                 
                 # Log to wandb periodically
                 if step % metrics_log_interval == 0:
@@ -801,210 +987,215 @@ def run_ep_worker(
             # Wait for tokens from rank 0
             elif worker_rank != 0:
                 logger.info(f"[Step {step}] Worker {worker_rank} waiting for tokens from rank 0...")
-            
-            while True:
-                with lock:
-                    curr_tokens_len = len(tokens_received[step])
                 
-                if worker_rank == 0:
-                    # Rank 0 has already stored its tokens
-                    if curr_tokens_len >= 1:
-                        break
-                else:
-                    # Other workers wait for tokens from rank 0
-                    if curr_tokens_len >= 1:
-                        logger.info(f"[Step {step}] Worker {worker_rank} received tokens from rank 0")
-                        break
-                
-                step_event.wait(timeout=1.0)
-                step_event.clear()
-
-            # Process routed tokens through local experts and compute gradients
-            logger.info(f"[Step {step}] Worker {worker_rank} processing tokens through local experts")
-            
-            # Get tokens and target for this worker
-            token_data = tokens_received[step][worker_rank]  
-            peer_tokens = token_data['tokens']  # Dict[expert_idx -> tokens]
-            target = token_data['target'].to(device)
-            
-            # Log which experts this worker is processing
-            logger.info(f"[Step {step}] Worker {worker_rank} processing experts: {list(peer_tokens.keys())}")
-            logger.info(f"[Step {step}] Worker {worker_rank} expert shard assignment: {expert_shard_indices}")
-            
-            # Compute gradients on routed tokens
-            if peer_tokens and len(peer_tokens) > 0:
-                # Concatenate tokens from all assigned experts in sorted order by expert index
-                sorted_expert_tokens = [peer_tokens[expert_idx] for expert_idx in sorted(peer_tokens.keys())]
-                combined_tokens = torch.cat(sorted_expert_tokens, dim=0)  # Stack tokens along batch dimension
-                
-                logger.info(f"[Step {step}] Worker {worker_rank} combined {len(sorted_expert_tokens)} expert token sets into shape {combined_tokens.shape}")
-                
-                local_loss, local_grads = compute_leader_gradients(
-                    device, sharded_model, combined_tokens, target, criterion, optimizer, config
-                )
-            else:
-                # No tokens routed to this worker's experts
-                logger.warning(f"[Step {step}] Worker {worker_rank} received no tokens for its experts")
-                local_grads = {name: torch.zeros_like(param) for name, param in sharded_model.named_parameters()}
-                local_loss = torch.tensor(0.0, device=device)
-            
-            with lock:
-                grads_received[step][worker_rank] = local_grads
-
-            total_loss += local_loss.item()
-            
-            # Clear GPU cache
-            clear_gpu_cache(device)
-            
-            logger.info(
-                f"[Step {step} / {num_epochs * len(train_loader)}] Worker {worker_rank} loss after expert processing: {local_loss.item():.4f}"
-            )
-            
-            train_ppl = math.exp(local_loss.item()) if local_loss.item() > 0 else float('inf')
-
-            wandb.log(
-                {
-                    "step": step,
-                    "epoch": epoch + 1,
-                    f"losses/worker_{worker_rank}_step": local_loss.item(),
-                    f"losses/worker_{worker_rank}_total_train": total_loss / (batch_idx + 1),
-                    f"ppl/worker_{worker_rank}_train": train_ppl,
-                }
-            )
-            
-            # Phase 2: Share gradients - send local gradients to rank 0 for averaging
-            logger.info(
-                f"[Step {step}] Phase 2: Sending local gradients to rank 0 for averaging"
-            )
-
-            if worker_rank != 0:
-                # Other workers send gradients to rank 0
-                rank0_socket = outbound_worker_sockets[0]
-                send_message(
-                    rank0_socket,
-                    (
-                        "share_gradients",
-                        step,
-                        worker_rank,
-                        local_grads,
-                    ),
-                )
-                logger.info(
-                    f"[Step {step}] Worker {worker_rank} sent gradients to rank 0"
-                )
-            
-            # Wait for all workers to share their gradients (only rank 0 does this)
-            if worker_rank == 0:
-                logger.info(f"[Step {step}] Rank 0 waiting for gradients from all workers...")
                 while True:
+                    
                     with lock:
-                        curr_grads_len = len(grads_received[step])
+                        has_tokens = True if worker_rank in tokens_received[step] else False
 
-                    logger.info(
-                        f"Rank 0 - Epoch {epoch + 1}/{num_epochs}, Step {step}/{num_epochs * len(train_loader)}: Received gradients from {curr_grads_len}/{NUM_WORKERS} workers."
-                    )
-                    if curr_grads_len < NUM_WORKERS:
-                        logger.info(f"Rank 0 waiting for more gradients for step {step}...")
-                        step_event.wait(timeout=1.0)
+                    # logger.info(f"[Step {step}] Tokens received: {tokens_received}. For {step} received: {tokens_received[step]}")
+                    if not has_tokens:
+                        logger.info(f"Waiting for more tokens for step {step}...")
+                        step_event.wait()
                         step_event.clear()
                     else:
                         break
 
-            # Rank 0: Average gradients and broadcast to all workers
-            if worker_rank == 0:
-                if len(grads_received[step]) != 0:
-                    logger.info(
-                        f"[Step {step} / {num_epochs * len(train_loader)}] Rank 0 averaging gradients from {len(grads_received[step])} workers"
-                    )
+            # Process routed activations through local expert blocks
+            logger.info(f"[Step {step}] Worker {worker_rank} processing activations through local expert blocks")
 
-                    # Reduce the grads
-                    grads_reduced = reduce(grads_received[step], len(grads_received[step]))
-
-                    logger.info(
-                        f"[Step {step}] Rank 0 averaged gradients successfully"
-                    )
-
-                    # Broadcast averaged gradients to all workers
-                    for peer_rank, peer_socket in outbound_worker_sockets.items():
-                        send_message(
-                            peer_socket,
-                            (
-                                "all_reduce",
-                                step,
-                                worker_rank,
-                                grads_reduced,
-                            ),
-                        )
-                        logger.info(
-                            f"[Step {step}] Rank 0 sent averaged gradients to worker {peer_rank}"
-                        )
-
-                    logger.info(
-                        f"[Step {step}] Rank 0 gradient broadcast complete"
-                    )
-                    
-                    # Rank 0 uses the averaged gradients directly
-                    with lock:
-                        reduced_grads_received[step][0] = grads_reduced
-                else:
-                    logger.warning(
-                        f"[Step {step}] Rank 0: No gradients received. Skipping grad update."
-                    )
+            # Get token data (activations) and routing info for this worker
             
-            # All workers: Wait for reduced gradients from rank 0
-            logger.info(f"[Step {step}] Worker {worker_rank} waiting for averaged gradients from rank 0...")
-            while True:
+            # try:
+            token_data = tokens_received[step][worker_rank]  
+            peer_tokens = token_data['tokens']   # Dict[expert_idx (int) -> activations]
+            ep_probs = token_data['expert_probs'].to(device)    # [batch, seq, top_k]
+            ep_indices = token_data['expert_indices'].to(device) # [batch, seq, top_k]
+            target = token_data['target'].to(device)
+
+            batch_size, seq_len, _ = ep_probs.shape
+
+            local_token_counts = {
+                int(expert_idx): int(tokens.shape[0])
+                for expert_idx, tokens in peer_tokens.items()
+            }
+            logger.info(
+                f"[Step {step}] Worker {worker_rank} batch summary: "
+                f"assigned_experts={expert_shard_indices}, "
+                f"active_experts={sorted(list(peer_tokens.keys()))}, "
+                f"token_counts={local_token_counts}, "
+                f"total_tokens={sum(local_token_counts.values())}"
+            )
+
+            logger.info(f"[Step {step}] Worker {worker_rank} processing experts: {expert_shard_indices}")
+
+            # Run local experts and build contribution tensor
+            contribution = compute_expert_contributions(
+                peer_tokens=peer_tokens,
+                expert_probs=ep_probs,
+                expert_indices=ep_indices,
+                expert_shard_indices=expert_shard_indices,
+                local_experts=local_experts,
+                embedding_dims=embedding_dims,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                device=device,
+            )
+
+            logger.info(f"[Step {step}] Worker {worker_rank} built contribution tensor of shape {contribution.shape}")
+
+            # Send contribution to last rank (or store locally if this is the last rank)
+            if worker_rank != num_nodes - 1:
+                last_rank_socket = outbound_worker_sockets[num_nodes - 1]
+                send_message(
+                    last_rank_socket,
+                    ("return_activations", step, worker_rank, contribution.detach().cpu()),
+                )
+                logger.info(f"[Step {step}] Worker {worker_rank} sent activations to last rank {num_nodes - 1}")
+                local_grads = {}
+                local_loss = torch.tensor(0.0, device=device)
+            else:
                 with lock:
-                    curr_reduced_len = len(reduced_grads_received[step])
+                    activations_received[step][worker_rank] = contribution
+
+            # Last rank: gather expert activations from all workers and run Mixtral transformer
+            if worker_rank == num_nodes - 1:
+                logger.info(f"[Step {step}] Last rank waiting for activations from all workers...")
+                while True:
+                    with lock:
+                        curr_act_len = len(activations_received[step])
+                        
+                    if curr_act_len >= NUM_WORKERS:
+                        break
+                    step_event.wait()
+                    step_event.clear()
+
+                # Aggregate: sum contributions from all workers
+                aggregated = torch.zeros(batch_size, seq_len, embedding_dims, device=device)
+                with lock:
+                    for rank_contrib in activations_received[step].values():
+                        aggregated += rank_contrib.to(device)
+
+                logger.info(f"[Step {step}] Last rank aggregated activations of shape {aggregated.shape}")
+
+                # Run Mixtral forward + loss + backward
+                local_loss, local_grads = compute_leader_gradients(
+                    device, mixtral, aggregated, target, criterion, optimizer, config
+                )
+                logger.info(f"[Step {step}] Last rank Mixtral loss: {local_loss.item():.4f}")
+            
+                with lock:
+                    grads_received[step][worker_rank] = local_grads
+
+                total_loss += local_loss.item()
+            
+          
+                    
+                # Clear GPU cache
+                clear_gpu_cache(device)
                 
                 logger.info(
-                    f"[Step {step}] Worker {worker_rank} has {curr_reduced_len} reduced gradient set(s)"
+                    f"[Step {step} / {total_steps}] Worker {worker_rank} loss after expert processing: {local_loss.item():.4f}"
                 )
                 
-                if curr_reduced_len >= 1:
-                    logger.info(f"[Step {step}] Worker {worker_rank} received averaged gradients")
-                    break
-                
-                step_event.wait(timeout=1.0)
-                step_event.clear()
+                train_ppl = math.exp(local_loss.item()) if local_loss.item() > 0 else float('inf')
 
-            # Apply averaged gradients to local model
+                wandb.log(
+                    {
+                        "step": step,
+                        "epoch": epoch + 1,
+                        f"losses/worker_{worker_rank}_step": local_loss.item(),
+                        f"losses/worker_{worker_rank}_total_train": total_loss / (batch_idx + 1),
+                        f"ppl/worker_{worker_rank}_train": train_ppl,
+                    }
+                )
+            
+            # Phase 2: last rank is the single gradient source and broadcasts to every worker
+            if worker_rank == num_nodes - 1:
+                logger.info(
+                    f"[Step {step}] Last rank broadcasting gradients to all workers"
+                )
+                for peer_rank, peer_socket in outbound_worker_sockets.items():
+                    send_message(
+                        peer_socket,
+                        (
+                            "parameter_server_reduce",
+                            step,
+                            peer_rank,
+                            local_grads,
+                        ),
+                    )
+                    logger.info(
+                        f"[Step {step}] Last rank sent gradients to worker {peer_rank}"
+                    )
+
+                # Last rank also keeps local copy so all workers follow same receive path
+                with lock:
+                    reduced_grads_received[step][worker_rank] = local_grads
+
+            # All workers: Wait for gradients broadcast from last rank
+            logger.info(
+                f"[Step {step}] Worker {worker_rank} waiting for broadcast gradients from last rank..."
+            )
+            
+            while True:
+                    with lock:
+                        has_grads = worker_rank in reduced_grads_received[step]
+
+                    if has_grads:
+                        break
+                    
+                    step_event.wait()
+                    step_event.clear()
+                    
+
+            # Apply broadcast gradients to local model
             if len(reduced_grads_received[step]) > 0:
-                grads_reduced = reduced_grads_received[step][0]  # Get from rank 0
+                grads_reduced = reduced_grads_received[step][worker_rank]
                 
                 logger.info(
-                    f"[Step {step}] Worker {worker_rank} applying averaged gradients to local model"
+                    f"[Step {step}] Worker {worker_rank} applying broadcast gradients to local model"
                 )
 
-                set_gradients(grads_reduced, model)
+                # Ensure optimizer step uses only this step's received gradients.
+                optimizer.zero_grad(set_to_none=True)
+
+                # Apply gradients to local model components by name matching
+                set_gradients(grads_reduced, local_experts)
+                if worker_rank == 0 and text_embeddings is not None:
+                    set_gradients(grads_reduced, text_embeddings)
+                if worker_rank == num_nodes - 1 and mixtral is not None:
+                    set_gradients(grads_reduced, mixtral)
                 optimizer.step()
 
                 logger.info(
-                    f"[Step {step}] Worker {worker_rank} model updated with averaged gradients"
+                    f"[Step {step}] Worker {worker_rank} model updated with broadcast gradients"
                 )
-                
-                
+
                 # Cleanup step data
                 reduced_grads_received.pop(step, None)
                 grads_received.pop(step, None)
                 tokens_received.pop(step, None)
+                activations_received.pop(step, None)
                 del grads_reduced, local_grads
                 gc.collect()
             else:
                 logger.warning(
-                    f"[Step {step}] Worker {worker_rank}: No averaged gradients received. Skipping grad update."
+                    f"[Step {step}] Worker {worker_rank}: No broadcast gradients received. Skipping grad update."
                 )
                 del local_grads
 
-            # Apply gradient clipping
+            # Apply gradient clipping across local components
             if grad_clip_norm > 0.0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), grad_clip_norm
-                )
-                if step % 100 == 0:  # Log occasionally to avoid spam
-                    logger.info(
-                        f"[Step {step}] Gradient norm before clipping: {grad_norm:.4f}"
-                    )
+                params_to_clip = list(local_experts.parameters())
+                if worker_rank == 0 and text_embeddings is not None:
+                    params_to_clip += list(text_embeddings.parameters())
+                if worker_rank == num_nodes - 1 and mixtral is not None:
+                    params_to_clip += list(mixtral.parameters())
+                if params_to_clip:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, grad_clip_norm)
+                    if worker_rank == num_nodes - 1 and step % 100 == 0:
+                        logger.info(f"[Step {step}] Gradient norm before clipping: {grad_norm:.4f}")
 
             # Step the scheduler after optimizer
             if scheduler is not None:
@@ -1017,10 +1208,8 @@ def run_ep_worker(
             batch_time = time.time() - batch_start_time
             if worker_rank == 0 and 'data' in locals():
                 tokens_processed = data.size(0) * data.size(1)
-            elif 'combined_tokens' in locals() and combined_tokens is not None:
-                tokens_processed = combined_tokens.size(0) * (combined_tokens.size(1) if combined_tokens.dim() > 1 else 1)
             else:
-                tokens_processed = 0
+                tokens_processed = batch_size * seq_len if 'batch_size' in locals() else 0
             tok_per_sec = tokens_processed / batch_time if batch_time > 0 else 0
 
             # Update batch progress bar with current metrics (only for rank 0)
@@ -1040,16 +1229,20 @@ def run_ep_worker(
 
             # Log gradient norms if tracking enabled
             if track_gradients:
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        grad_norm = torch.norm(param.grad.detach(), 2).item()
-                        wandb.log(
-                            {
-                                f"gradients/layer_{name}": grad_norm,
-                                "step": step,
-                                "epoch": epoch + 1,
-                            }
-                        )
+                local_modules = {"experts": local_experts}
+                if worker_rank == num_nodes - 1 and mixtral is not None:
+                    local_modules["mixtral"] = mixtral
+                for module_name, module in local_modules.items():
+                    for name, param in module.named_parameters():
+                        if param.grad is not None:
+                            grad_norm = torch.norm(param.grad.detach(), 2).item()
+                            wandb.log(
+                                {
+                                    f"gradients/{module_name}/{name}": grad_norm,
+                                    "step": step,
+                                    "epoch": epoch + 1,
+                                }
+                            )
 
             # Log network metrics if tracking enabled
             if track_network_metrics and step % metrics_log_interval == 0:
@@ -1084,74 +1277,66 @@ def run_ep_worker(
                         f"Recv={network_stats.get('recv_bandwidth_mbps', 0):.2f}Mbps"
                     )
 
-            # Evaluation (only rank 0 since it has val_loader)
-            if worker_rank == 0 and step % eval_steps == 0:
-                val_loss, val_ppl = evaluate(
-                    device,
-                    model,
-                    val_loader,
-                    criterion,
-                    decoder_type_ppl=decoder_type_ppl,
+            # Minimal distributed validation: use one val batch routed through EP pipeline.
+            if step !=0 and eval_steps > 0 and step % eval_steps == 0:
+                val_loss, val_iter = run_distributed_eval_step(
+                    step=step,
+                    worker_rank=worker_rank,
+                    num_nodes=num_nodes,
+                    num_experts=num_experts,
+                    num_workers=NUM_WORKERS,
+                    device=device,
+                    val_loader=val_loader,
+                    val_iter=val_iter,
+                    text_embeddings=text_embeddings,
+                    router=router,
+                    expert_shard_indices=expert_shard_indices,
+                    local_experts=local_experts,
+                    embedding_dims=embedding_dims,
+                    mixtral=mixtral,
+                    criterion=criterion,
+                    outbound_worker_sockets=outbound_worker_sockets,
+                    tokens_received=tokens_received,
+                    activations_received=activations_received,
+                    eval_losses_received=eval_losses_received,
+                    lock=lock,
+                    step_event=step_event,
                 )
 
-                if decoder_type_ppl:
-                    wandb.log(
-                        {
-                            "step": step,
-                            "epoch": epoch + 1,
-                            "losses/val": val_loss,
-                            "ppl/val": val_ppl,
-                        }
-                    )
-                    eval_msg = f"[Step {step}] Evaluation: Val Loss={val_loss:.4f}, Val PPL={val_ppl:.2f}"
-                    logger.info(eval_msg)
-
-                    # Update progress bar
-                    batch_pbar.set_postfix(
-                        {"val_loss": f"{val_loss:.4f}", "ppl": f"{val_ppl:.2f}"}
-                    )
-                else:
-                    wandb.log(
-                        {
-                            "step": step,
-                            "epoch": epoch + 1,
-                            "losses/val": val_loss,
-                        }
-                    )
-                    eval_msg = f"[Step {step}] Evaluation: Val Loss={val_loss:.4f}"
-                    logger.info(eval_msg)
-
-                    # Update progress bar
-                    batch_pbar.set_postfix({"val_loss": f"{val_loss:.4f}"})
+                if worker_rank == 0 and val_loss is not None:
+                    val_metrics = {
+                        "step": step,
+                        "epoch": epoch + 1,
+                        "losses/val": val_loss,
+                    }
+                    if val_loss > 0:
+                        val_metrics["ppl/val"] = math.exp(val_loss)
+                    wandb.log(val_metrics)
+                    logger.info(f"[Step {step}] Validation: Val Loss={val_loss:.4f}")
+            else:
+                val_loss = None
 
             # Save checkpoint at regular intervals
             if save_checkpoints and should_save_checkpoint(
-                step, epoch, checkpoint_steps, num_epochs * len(train_loader)
+                step, epoch, checkpoint_steps, total_steps
             ):
                 # Wrap model_layers in Sequential for proper state_dict saving
 
                 checkpoint_manager.save_checkpoint(
-                    model=model,
+                    model=local_experts,
                     optimizer=optimizer,
                     scheduler=scheduler,  # Save scheduler state
                     step=step,
                     epoch=epoch,
                     loss=None,
                     metadata={
-                        "val_loss": val_loss
-                        if step % eval_steps == 0 and step != 0
-                        else None,
+                        "val_loss": val_loss,
                         "learning_rate": current_lr,
                     },
                 )
                 logger.info(f"[Step {step}] Checkpoint saved")
 
-                # Clean up activations tensor
-                if activations is not None:
-                    del activations
-
             gc.collect()
-            activations = None
 
         # Log epoch summary of expert usage (only rank 0 has complete view)
         if worker_rank == 0:

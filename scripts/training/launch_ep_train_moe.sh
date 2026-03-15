@@ -419,7 +419,6 @@ fi
 launch_on_node "$WORKER_0_HOSTNAME" "$WORKER_0_CMD" "ep_worker0"
 echo "   ✅ Rank 0: $WORKER_0_HOSTNAME (ep_worker0)"
 
-
 if [[ ${#TABLET_WORKERS[@]} -gt 0 ]]; then
     echo "ℹ️  Tablets should run manually: "
     for worker_entry in "${TABLET_WORKERS[@]}"; do

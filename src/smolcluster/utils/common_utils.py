@@ -320,6 +320,8 @@ def receive_message(
 
 
 def get_gradients(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    if model is None:
+        return {}
     grads = {}
     for name, param in model.named_parameters():
         if param.grad is not None:
@@ -330,9 +332,8 @@ def get_gradients(model: torch.nn.Module) -> dict[str, torch.Tensor]:
 def set_gradients(grads: dict[str, torch.Tensor], model: torch.nn.Module):
     for name, param in model.named_parameters():
         if name in grads:
-            if param.grad is not None:
-                grads[name] = grads[name].to(param.device)
-                param.grad = grads[name].clone()
+            grads[name] = grads[name].to(param.device)
+            param.grad = grads[name].clone()
 
 
 def avg_grads(incoming_grads: dict[str, torch.Tensor], model: torch.nn.Module, num_workers: int):

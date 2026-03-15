@@ -2,12 +2,10 @@
 Pytest test suite for MoE (Mixtral) model.
 
 Tests cover:
-- MoE layer functionality
 - Expert routing
 - Model instantiation
 - Forward passes
 - Shape validation
-- Parameter counting
 - Gradient flow
 - Different configurations
 """
@@ -21,7 +19,6 @@ from smolcluster.models.moe import (
     LayerNormalization,
     MHA,
     Mixtral,
-    MoeLayer,
     RotaryEmbeddings,
     SWiGLUExpertMoE,
     Swish,
@@ -171,445 +168,210 @@ class TestSWiGLUExpertMoE:
         assert not torch.isnan(x.grad).any()
 
 
-class TestMoeLayer:
-    """Test suite for MoE Layer."""
-
-    def test_initialization(self, model_dim, num_experts, top_k_experts, device):
-        """Test MoE layer initializes correctly."""
-        moe = MoeLayer(
-            embeddings_dims=model_dim,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            device=device,
-        )
-        assert len(moe.heads) == num_experts
-        assert moe.num_experts == num_experts
-        assert moe.top_k == top_k_experts
-
-    def test_forward_shape(self, model_dim, num_experts, top_k_experts, device, batch_size, small_seq_len):
-        """Test that MoE layer maintains input shape."""
-        moe = MoeLayer(
-            embeddings_dims=model_dim,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            device=device,
-        )
-        x = torch.randn(batch_size, small_seq_len, model_dim)
-        output = moe(x)
-        assert output.shape == x.shape
-
-    def test_expert_routing(self, model_dim, num_experts, top_k_experts, device, batch_size, small_seq_len):
-        """Test that experts are routed correctly."""
-        moe = MoeLayer(
-            embeddings_dims=model_dim,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            device=device,
-        )
-        x = torch.randn(batch_size, small_seq_len, model_dim)
-        
-        # Hook to check which experts are called
-        experts_called = []
-        
-        def hook(module, input, output):
-            experts_called.append(True)
-        
-        for expert in moe.heads:
-            expert.register_forward_hook(hook)
-        
-        output = moe(x)
-        
-        # At least some experts should be called
-        assert len(experts_called) > 0
-
-    def test_gradient_flow(self, model_dim, num_experts, top_k_experts, device, batch_size, small_seq_len):
-        """Test that gradients flow through MoE layer."""
-        moe = MoeLayer(
-            embeddings_dims=model_dim,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            device=device,
-        )
-        x = torch.randn(batch_size, small_seq_len, model_dim, requires_grad=True)
-        output = moe(x)
-        loss = output.sum()
-        loss.backward()
-        
-        assert x.grad is not None
-        assert not torch.isnan(x.grad).any()
-
-
 class TestTransformerDecoderBlock:
-    """Test suite for Transformer Decoder Block with MoE."""
+    """Test suite for Transformer Decoder Block (attention-only; MoE is distributed externally)."""
 
-    def test_initialization(self, model_dim, num_heads, num_experts, top_k_experts, device):
+    def test_initialization(self, model_dim, num_heads, device):
         """Test decoder block initializes correctly."""
         block = TransformerDecoderBlock(
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
-            num_experts=num_experts,
-            top_k=top_k_experts,
             device=device,
         )
         assert block.mha is not None
-        assert block.moe_block is not None
+        assert block.layer_norm1 is not None
 
-    def test_forward_shape(
-        self, model_dim, num_heads, num_experts, top_k_experts, device, batch_size, small_seq_len
-    ):
+    def test_forward_shape(self, model_dim, num_heads, device, batch_size, small_seq_len):
         """Test that decoder block maintains shape."""
         block = TransformerDecoderBlock(
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
-            num_experts=num_experts,
-            top_k=top_k_experts,
             device=device,
         )
         x = torch.randn(batch_size, small_seq_len, model_dim)
         output = block(x)
         assert output.shape == x.shape
 
+    def test_gradient_flow(self, model_dim, num_heads, device, batch_size, small_seq_len):
+        """Test that gradients flow through decoder block."""
+        block = TransformerDecoderBlock(
+            embeddings_dims=model_dim,
+            no_of_heads=num_heads,
+            device=device,
+        )
+        x = torch.randn(batch_size, small_seq_len, model_dim, requires_grad=True)
+        output = block(x)
+        output.sum().backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
+
 
 class TestMixtral:
-    """Test suite for Mixtral (MoE Transformer) model."""
+    """Test suite for Mixtral (last-rank transformer).
 
-    def test_initialization(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts, small_seq_len, device
-    ):
-        """Test Mixtral initializes correctly."""
+    Mixtral now accepts expert-processed activations [batch, seq, embedding_dims],
+    NOT raw token indices. Embeddings and routing live on rank 0.
+    """
+
+    def _make_activations(self, batch_size, seq_len, model_dim):
+        return torch.randn(batch_size, seq_len, model_dim)
+
+    def test_initialization(self, small_vocab_size, model_dim, num_heads, num_layers, device):
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
         )
-        
         assert model.vocab_size == small_vocab_size
         assert model.embeddings_dims == model_dim
         assert len(model.decoder_layers) == num_layers
 
-    def test_forward_pass(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts, 
-        small_seq_len, device, sample_input
-    ):
-        """Test that forward pass works correctly."""
+    def test_forward_shape(self, small_vocab_size, model_dim, num_heads, num_layers, device, batch_size, small_seq_len):
+        """Forward pass accepts activations and returns logits."""
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
         )
         model.eval()
-        
+        activations = self._make_activations(batch_size, small_seq_len, model_dim)
         with torch.no_grad():
-            output = model(sample_input)
-        
-        batch_size, seq_len = sample_input.shape
-        assert output.shape == (batch_size, seq_len, small_vocab_size)
+            output = model(activations)
+        assert output.shape == (batch_size, small_seq_len, small_vocab_size)
 
-    def test_parameter_counting(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts, small_seq_len, device
-    ):
-        """Test that parameter counting works."""
+    def test_parameter_counting(self, small_vocab_size, model_dim, num_heads, num_layers, device):
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
         )
-        
         num_params = model.get_num_params()
-        expected_params = sum(p.numel() for p in model.parameters())
-        
-        assert num_params == expected_params
+        assert num_params == sum(p.numel() for p in model.parameters())
         assert num_params > 0
 
-    def test_gradient_flow(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, device, sample_input, sample_labels
-    ):
-        """Test that gradients flow through the entire model."""
+    def test_gradient_flow(self, small_vocab_size, model_dim, num_heads, num_layers, device, batch_size, small_seq_len, sample_labels):
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
             dropout=0.0,
         )
-        
-        output = model(sample_input)
-        loss = nn.functional.cross_entropy(
-            output.view(-1, small_vocab_size),
-            sample_labels.view(-1)
-        )
+        activations = self._make_activations(batch_size, small_seq_len, model_dim)
+        output = model(activations)
+        loss = nn.functional.cross_entropy(output.view(-1, small_vocab_size), sample_labels.view(-1))
         loss.backward()
-        
-        # Check that parameters have gradients
-        params_with_grad = 0
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                assert param.grad is not None, f"No gradient for {name}"
-                if not torch.all(param.grad == 0):
-                    params_with_grad += 1
-        
-        # At least some parameters should have non-zero gradients
+
+        params_with_grad = sum(
+            1 for p in model.parameters()
+            if p.requires_grad and p.grad is not None and not torch.all(p.grad == 0)
+        )
         assert params_with_grad > 0
 
-    def test_different_expert_configurations(
-        self, small_vocab_size, model_dim, num_heads, num_layers, small_seq_len, device, sample_input
-    ):
-        """Test model with different expert configurations."""
-        configs = [
-            {"num_experts": 4, "top_k": 1},
-            {"num_experts": 4, "top_k": 2},
-            {"num_experts": 8, "top_k": 2},
-        ]
-        
-        for config in configs:
-            model = Mixtral(
-                vocab_size=small_vocab_size,
-                embeddings_dims=model_dim,
-                no_of_heads=num_heads,
-                no_of_decoder_layers=num_layers,
-                num_experts=config["num_experts"],
-                top_k=config["top_k"],
-                max_seq_len=small_seq_len,
-                device=device,
-            )
-            model.eval()
-            
-            with torch.no_grad():
-                output = model(sample_input)
-            
-            assert output.shape[0] == sample_input.shape[0]
-
-    def test_flash_attention(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, device, sample_input
-    ):
-        """Test model with flash attention enabled."""
+    def test_different_sequence_lengths(self, small_vocab_size, model_dim, num_heads, num_layers, device, batch_size, small_seq_len):
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
         )
         model.eval()
-        
-        with torch.no_grad():
-            output = model(sample_input)
-        
-        assert output.shape[2] == small_vocab_size
-
-    def test_different_sequence_lengths(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, device, batch_size
-    ):
-        """Test model with different sequence lengths."""
-        model = Mixtral(
-            vocab_size=small_vocab_size,
-            embeddings_dims=model_dim,
-            no_of_heads=num_heads,
-            no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
-            device=device,
-        )
-        model.eval()
-        
-        # Test with shorter sequence
         short_seq = small_seq_len // 2
-        input_ids = torch.randint(0, small_vocab_size, (batch_size, short_seq))
-        
+        activations = self._make_activations(batch_size, short_seq, model_dim)
         with torch.no_grad():
-            output = model(input_ids)
-        
+            output = model(activations)
         assert output.shape == (batch_size, short_seq, small_vocab_size)
 
-    def test_eval_mode_deterministic(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, device, sample_input
-    ):
-        """Test that eval mode produces deterministic results."""
+    def test_eval_mode_deterministic(self, small_vocab_size, model_dim, num_heads, num_layers, device, batch_size, small_seq_len):
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
             dropout=0.5,
-            noisy_topk=False,  # Explicitly disable noisy routing
         )
-        
         model.eval()
-        
+        activations = self._make_activations(batch_size, small_seq_len, model_dim)
         with torch.no_grad():
-            output1 = model(sample_input)
-            output2 = model(sample_input)
-        
-        assert torch.allclose(output1, output2, atol=1e-6)
+            out1 = model(activations)
+            out2 = model(activations)
+        assert torch.allclose(out1, out2, atol=1e-6)
 
     @pytest.mark.slow
     def test_large_model(self, small_vocab_size, device):
-        """Test creation of a larger MoE model (slow test)."""
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=512,
             no_of_heads=8,
             no_of_decoder_layers=6,
-            num_experts=8,
-            top_k=2,
-            max_seq_len=256,
             device=device,
         )
-        
-        num_params = model.get_num_params()
-        assert num_params > 5_000_000  # Should have over 5M parameters
+        assert model.get_num_params() > 5_000_000
 
     @pytest.mark.cuda
-    def test_cuda_compatibility(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, sample_input
-    ):
-        """Test that model works on CUDA device."""
+    def test_cuda_compatibility(self, small_vocab_size, model_dim, num_heads, num_layers, batch_size, small_seq_len):
         device = torch.device("cuda")
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
         ).to(device)
-        
-        input_ids = sample_input.to(device)
-        
+        activations = torch.randn(batch_size, small_seq_len, model_dim, device=device)
         with torch.no_grad():
-            output = model(input_ids)
-        
+            output = model(activations)
         assert output.device.type == "cuda"
 
 
 class TestMixtralIntegration:
     """Integration tests for Mixtral model."""
 
-    def test_training_step(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, device, sample_input, sample_labels
-    ):
-        """Test a full training step."""
+    def test_training_step(self, small_vocab_size, model_dim, num_heads, num_layers, device, batch_size, small_seq_len, sample_labels):
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
         )
-        
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        
-        # Forward pass
-        output = model(sample_input)
-        loss = nn.functional.cross_entropy(
-            output.view(-1, small_vocab_size),
-            sample_labels.view(-1)
-        )
-        
-        # Backward pass
+        activations = torch.randn(batch_size, small_seq_len, model_dim)
+        output = model(activations)
+        loss = nn.functional.cross_entropy(output.view(-1, small_vocab_size), sample_labels.view(-1))
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        
         assert loss.item() > 0
 
-    def test_overfitting_single_batch(
-        self, small_vocab_size, model_dim, num_heads, num_layers, num_experts, top_k_experts,
-        small_seq_len, device, sample_input, sample_labels
-    ):
-        """Test that model can overfit a single batch (sanity check)."""
+    def test_overfitting_single_batch(self, small_vocab_size, model_dim, num_heads, num_layers, device, batch_size, small_seq_len, sample_labels):
+        """Model can overfit a fixed activation batch (sanity check)."""
         model = Mixtral(
             vocab_size=small_vocab_size,
             embeddings_dims=model_dim,
             no_of_heads=num_heads,
             no_of_decoder_layers=num_layers,
-            num_experts=num_experts,
-            top_k=top_k_experts,
-            max_seq_len=small_seq_len,
             device=device,
-            dropout=0.0,  # Disable dropout for overfitting
+            dropout=0.0,
         )
-        
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
-        
+        activations = torch.randn(batch_size, small_seq_len, model_dim)
         initial_loss = None
-        final_loss = None
-        
-        # Train for a few iterations
         for i in range(50):
-            output = model(sample_input)
-            loss = nn.functional.cross_entropy(
-                output.view(-1, small_vocab_size),
-                sample_labels.view(-1)
-            )
-            
+            output = model(activations)
+            loss = nn.functional.cross_entropy(output.view(-1, small_vocab_size), sample_labels.view(-1))
             if i == 0:
                 initial_loss = loss.item()
-            
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            
-            if i == 49:
-                final_loss = loss.item()
-        
-        # Loss should decrease significantly
-        assert final_loss < initial_loss * 0.5
-
-    def test_moe_vs_standard_comparison(
-        self, small_vocab_size, model_dim, num_heads, num_layers, small_seq_len, device
-    ):
-        """Test that MoE has more parameters than standard model for same config."""
-        moe_model = Mixtral(
-            vocab_size=small_vocab_size,
-            embeddings_dims=model_dim,
-            no_of_heads=num_heads,
-            no_of_decoder_layers=num_layers,
-            num_experts=4,
-            top_k=2,
-            max_seq_len=small_seq_len,
-            device=device,
-        )
-        
-        moe_params = moe_model.get_num_params()
-        
-        # MoE should have more parameters due to multiple experts
-        assert moe_params > 100_000  # Should have reasonable number of parameters
+        assert loss.item() < initial_loss * 0.5

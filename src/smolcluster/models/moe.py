@@ -2,14 +2,15 @@
 Mixture of Experts (MoE) Transformer implementation (Mixtral-style).
 
 This module contains:
-- Mixtral: MoE-based decoder-only transformer with expert routing
-- MoeLayer: Sparse mixture of experts layer with top-k routing
+- Mixtral: Decoder-only transformer (attention + layernorm + lm_head) that accepts
+  expert-processed activations as input. Does NOT compute embeddings or MoE routing.
 - Router: Routing mechanism for expert selection with optional noisy top-k
-- ExpertBlock: Wrapper for SwiGLU MoE experts
+- ExpertBlock: Wrapper for SwiGLU MoE experts (distributed across workers)
+- TextEmbeddings: Token embedding layer (lives on rank 0)
 - SWiGLUExpertMoE: Expert implementation using SwiGLU activation
 """
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -341,95 +342,6 @@ class Router(nn.Module):
         return probs, top_k_indices
 
 
-class MoeLayer(nn.Module):
-    """Mixture of Experts layer with top-k routing."""
-
-    def __init__(
-        self,
-        embeddings_dims: int,
-        num_experts: int,
-        top_k: int,
-        device: torch.device,
-        noisy_topk: bool = False,
-        use_checkpointing: bool = False,
-        router: Optional[Router] = None,
-    ):
-        """Initialize MoE layer.
-
-        Args:
-            embeddings_dims: Dimension of embeddings.
-            num_experts: Number of experts.
-            top_k: Number of experts to route to.
-            device: Device to place tensors on.
-            noisy_topk: Whether to use noisy top-k gating.
-            use_checkpointing: Whether checkpointing is used.
-            router: Optional pre-initialized Router instance. If None, creates a new one.
-
-        """
-        super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
-        self.device = device
-
-        # Router handles all routing logic - use provided or create new
-        if router is not None:
-            self.router = router
-        else:
-            self.router = Router(
-                embeddings_dims=embeddings_dims,
-                num_experts=num_experts,
-                top_k=top_k,
-                device=device,
-                noisy_topk=noisy_topk if not use_checkpointing else False,
-            )
-
-        # Expert blocks
-        self.experts = nn.ModuleList(
-            [
-                ExpertBlock(embeddings_dims=embeddings_dims, device=device)
-                for _ in range(num_experts)
-            ]
-        )
-        
-        # Backward compatibility: 'heads' is an alias for 'experts'
-        self.heads = self.experts
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass for MoE layer.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, embeddings_dims).
-
-        Returns:
-            Output tensor after expert routing and combination.
-        """
-        # Get routing probabilities and expert indices from router
-        probs, top_k_indices = self.router(x)
-
-        # Initialize output tensor
-        out = torch.zeros_like(x)
-
-        # Route to experts
-        for expert_idx in range(self.num_experts):
-            # Create mask for current expert across all top_k positions
-            expert_mask = top_k_indices == expert_idx
-
-            # Sum probabilities for current expert
-            expert_weights = (probs * expert_mask).sum(dim=-1)  # [batch_size, seq_len]
-
-            # Get inputs where expert is used
-            selected = expert_weights > 0
-            if not selected.any():
-                continue
-
-            # Process all selected inputs through expert
-            expert_out = self.experts[expert_idx](x[selected])
-
-            # Weight and accumulate outputs
-            out[selected] += expert_out * expert_weights[selected].unsqueeze(-1)
-
-        return out
-
 
 class AttentionHead(nn.Module):
     """Single attention head with optional flash attention and RoPE."""
@@ -551,35 +463,28 @@ class MHA(nn.Module):
 
 
 class TransformerDecoderBlock(nn.Module):
-    """Transformer decoder block with MoE."""
+    """Transformer decoder block with attention and layer normalization.
+
+    MoE experts are distributed across workers and processed externally.
+    This block handles only attention and residual connection.
+    """
 
     def __init__(
         self,
         embeddings_dims: int,
         no_of_heads: int,
-        num_experts: int,
-        top_k: int,
         device: torch.device,
         attn_dropout: float = 0.1,
         dropout: float = 0.1,
-        noisy_topk: bool = False,
-        use_checkpointing: bool = False,
-        router: Optional[Router] = None,
     ):
         """Initialize transformer decoder block.
 
         Args:
             embeddings_dims: Dimension of embeddings.
             no_of_heads: Number of attention heads.
-            num_experts: Number of experts in MoE layer.
-            top_k: Number of experts to route to.
             device: Device to place tensors on.
             attn_dropout: Dropout probability for attention.
             dropout: General dropout probability.
-            noisy_topk: Whether to use noisy top-k gating.
-            use_checkpointing: Whether checkpointing is used.
-            router: Optional pre-initialized Router instance to pass to MoeLayer.
-
         """
         super().__init__()
         self.mha = MHA(
@@ -587,19 +492,8 @@ class TransformerDecoderBlock(nn.Module):
             no_of_heads=no_of_heads,
             device=device,
             attn_dropout=attn_dropout,
-
         )
         self.layer_norm1 = LayerNormalization(embeddings_dims)
-        self.layer_norm2 = LayerNormalization(embeddings_dims)
-        self.moe_block = MoeLayer(
-            embeddings_dims=embeddings_dims,
-            num_experts=num_experts,
-            top_k=top_k,
-            device=device,
-            noisy_topk=noisy_topk,
-            use_checkpointing=use_checkpointing,
-            router=router,
-        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for transformer decoder block.
@@ -608,15 +502,21 @@ class TransformerDecoderBlock(nn.Module):
             x: Input tensor.
 
         Returns:
-            Output tensor after attention and MoE.
+            Output tensor after attention.
         """
         x = x + self.mha(self.layer_norm1(x))
-        x = x + self.moe_block(self.layer_norm2(x))
         return x
 
 
 class Mixtral(nn.Module):
-    """Mixtral: MoE-based decoder-only transformer."""
+    """Mixtral: decoder-only transformer for the last rank in expert parallelism.
+
+    Accepts expert-processed activations as input. Does NOT compute embeddings
+    or perform MoE routing. Handles: attention, layernorm, decoder layers, lm_head.
+
+    Input: activations from aggregated expert outputs [batch_size, seq_len, embeddings_dims]
+    Output: logits [batch_size, seq_len, vocab_size]
+    """
 
     def __init__(
         self,
@@ -624,15 +524,9 @@ class Mixtral(nn.Module):
         embeddings_dims: int = 768,
         no_of_heads: int = 12,
         no_of_decoder_layers: int = 12,
-        num_experts: int = 8,
-        top_k: int = 2,
-        max_seq_len: int = 1024,
         device: torch.device = torch.device("cpu"),
         attn_dropout: float = 0.1,
         dropout: float = 0.1,
-        noisy_topk: bool = False,
-        use_checkpointing: bool = False,
-        router: Optional[Router] = None,
     ):
         """Initialize Mixtral model.
 
@@ -641,25 +535,14 @@ class Mixtral(nn.Module):
             embeddings_dims: Dimension of embeddings.
             no_of_heads: Number of attention heads.
             no_of_decoder_layers: Number of decoder layers.
-            num_experts: Number of experts in each MoE layer.
-            top_k: Number of experts to route to.
-            max_seq_len: Maximum sequence length.
             device: Device to place tensors on.
             attn_dropout: Dropout probability for attention.
             dropout: General dropout probability.
-            noisy_topk: Whether to use noisy top-k gating.
-            use_checkpointing: Whether to use gradient checkpointing.
-            router: Optional pre-initialized Router instance to use across all layers.
         """
         super().__init__()
         self.vocab_size = vocab_size
         self.embeddings_dims = embeddings_dims
-        self.max_seq_len = max_seq_len
-        self.use_checkpointing = use_checkpointing
 
-        self.text_embds = TextEmbeddings(
-            vocab_size=vocab_size, embeddings_dims=embeddings_dims, device=device
-        )
         self.linear_layer = nn.Linear(
             in_features=embeddings_dims, out_features=vocab_size, device=device, bias=False
         )
@@ -669,14 +552,9 @@ class Mixtral(nn.Module):
                 TransformerDecoderBlock(
                     embeddings_dims=embeddings_dims,
                     no_of_heads=no_of_heads,
-                    num_experts=num_experts,
-                    top_k=top_k,
                     device=device,
                     attn_dropout=attn_dropout,
                     dropout=dropout,
-                    noisy_topk=noisy_topk,
-                    use_checkpointing=use_checkpointing,
-                    router=router,
                 )
                 for _ in range(no_of_decoder_layers)
             ]
@@ -696,30 +574,25 @@ class Mixtral(nn.Module):
         elif isinstance(m, nn.Embedding):
             torch.nn.init.kaiming_normal_(m.weight)
 
-    def forward(
-        self, x: torch.Tensor
-        ) -> torch.Tensor:
+    def forward(self, activations: torch.Tensor) -> torch.Tensor:
         """Forward pass for Mixtral.
 
         Args:
-            x: Input token indices of shape (batch_size, seq_len).
+            activations: Expert-processed activations of shape
+                         (batch_size, seq_len, embeddings_dims).
 
         Returns:
             Logits of shape (batch_size, seq_len, vocab_size).
         """
-        x = self.text_embds(x)
-       
+        x = activations
         for layer in self.decoder_layers:
             x = layer(x)
-
         x = self.layer_norm(x)
+        return self.linear_layer(x)
 
-        out = self.linear_layer(x)
-        return out
-    
     def get_num_params(self) -> int:
         """Get the total number of parameters in the model.
-        
+
         Returns:
             Total number of parameters.
         """

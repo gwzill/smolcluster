@@ -1,9 +1,13 @@
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from safetensors import safe_open
+
+
+from smolcluster.models.moe import ExpertBlock, Router, TextEmbeddings
+
 
 logger = logging.getLogger(__name__)
 
@@ -158,33 +162,40 @@ def load_weights_per_node(
 
 
 def get_model_per_node(
-    model, num_nodes: int, local_rank: int, total_layers: int, model_type: str = "causal_gpt2",
-    num_experts: int = None, expert_indices: List[int] = None
+    model,
+    num_nodes: int,
+    local_rank: int,
+    total_layers: int,
+    model_type: str = "causal_gpt2",
+    num_experts: int = None,
+    model_config: Optional[Dict] = None,
 ) -> Tuple[torch.nn.ModuleList, dict]:
-    """Partition model across nodes based on model type.
-    
+    """Partition model components across nodes.
+
+    For 'causal_gpt2': extracts layer slices from a pre-built model.
+    For 'causal_mixtral' (Expert Parallelism): builds rank-specific components
+        from scratch — no full model required; pass model=None.
+
     Args:
-        model: The model to partition
-        num_nodes: Total number of nodes
-        local_rank: Rank of this node
-        total_layers: Total number of layers
-        model_type: Type of model ('causal_gpt2' or 'causal_mixtral')
-        num_experts: Total number of experts (for MoE models)
-        expert_indices: List of expert indices assigned to this node
-    
+        model:        Full model (causal_gpt2) or None (causal_mixtral).
+        num_nodes:    Total number of worker nodes.
+        local_rank:   This node's rank.
+        total_layers: Number of decoder layers.
+        model_type:   'causal_gpt2' or 'causal_mixtral'.
+        num_experts:  Number of MoE experts (causal_mixtral only).
+        model_config: Dict of hyperparams for causal_mixtral:
+                      vocab_size, embedding_dims, top_k, no_of_heads, device,
+                      attn_dropout, dropout, noisy_topk.
+
     Returns:
-        Tuple of (ModuleList of layers, dict of layer names to modules)
+        (ModuleList of all local modules, out_layers dict keyed by component name)
     """
     out_layers = {}
-
-    assert local_rank < num_nodes, "Local rank must be less than number of nodes"
+    assert local_rank < num_nodes, "local_rank must be less than num_nodes"
 
     if model_type == "causal_gpt2":
-        # Collect all transformer layers
         layers = list(model.blocks)
 
-        # Create indices for all layers and split them across nodes using torch.chunk
-        # This handles uneven splits automatically
         layer_indices = torch.arange(total_layers)
         split_indices = torch.chunk(layer_indices, num_nodes)
         logger.info(f"Layer splits: {split_indices}")
@@ -196,19 +207,13 @@ def get_model_per_node(
             out_layers["model.token_embedding"] = model.token_embedding
             out_layers["model.position_embedding"] = model.position_embedding
 
-            # Get the indices for this node's layers
             node_layer_indices = split_indices[local_rank].tolist()
-
-            # Add transformer layers for this node
             for layer_idx in node_layer_indices:
                 out_layers[f"model.blocks.{layer_idx}"] = layers[layer_idx]
 
         # Add final layers for last node
         elif local_rank == num_nodes - 1:
-            # Get the indices for this node's layers
             node_layer_indices = split_indices[local_rank].tolist()
-
-            # Add transformer layers for this node
             for layer_idx in node_layer_indices:
                 out_layers[f"model.blocks.{layer_idx}"] = layers[layer_idx]
 
@@ -216,97 +221,64 @@ def get_model_per_node(
             out_layers["model.lm_head"] = model.lm_head
 
         else:
-            # Get the indices for this node's layers
             node_layer_indices = split_indices[local_rank].tolist()
-
-            # Add transformer layers for this node
             for layer_idx in node_layer_indices:
                 out_layers[f"model.blocks.{layer_idx}"] = layers[layer_idx]
 
     elif model_type == "causal_mixtral":
-        # Expert Parallelism: Build components for this rank
-        # Note: For EP, the worker should build a partitioned model, not extract from full model
-        # This function returns info about what components this rank should have
+        # Expert Parallelism: extract components from the passed Mixtral model.
+        # Last rank gets the full Mixtral transformer; all ranks get ExpertBlocks
+        # built from model attributes; rank 0 additionally gets TextEmbeddings + Router.
         
-        assert num_experts is not None, "num_experts must be provided for causal_mixtral"
-        assert expert_indices is not None, "expert_indices must be provided for causal_mixtral"
-        
-        # Collect all decoder layers
-        layers = list(model.decoder_layers) if hasattr(model, 'decoder_layers') else []
-        
-        # Create indices for all layers and split them across nodes using torch.chunk
-        # This handles uneven splits automatically
-        layer_indices = torch.arange(total_layers)
-        split_indices = torch.chunk(layer_indices, num_nodes)
-        logger.info(f"Layer splits: {split_indices}")
-        logger.info(f"Rank {local_rank}: Expert Parallelism - Assigned experts {expert_indices}")
-        
-        assert len(split_indices) <= num_nodes
-        
-        # Add embeddings for first node
+        assert num_experts is not None, "num_experts required for causal_mixtral"
+        assert model_config is not None, "model_config required for causal_mixtral"
+
+        # Read arch params from the model itself (consistent with GPT2 pattern)
+        vocab_size     = model.vocab_size
+        embedding_dims = model.embeddings_dims
+        top_k          = model_config["top_k"]
+        device         = model_config["device"]
+        noisy_topk     = model_config.get("noisy_topk", True)
+
+        expert_shard_indices = get_expert_per_node(local_rank, num_nodes, num_experts)
+      
+        # Rank 0: TextEmbeddings + Router (built fresh — not part of Mixtral)
         if local_rank == 0:
-            if hasattr(model, 'text_embds'):
-                out_layers["model.text_embds"] = model.text_embds
-                logger.info(f"Rank {local_rank}: Added text embeddings")
-            
-            # Get the indices for this node's layers
-            node_layer_indices = split_indices[local_rank].tolist()
-            
-            # Add decoder layers for this node
-            for layer_idx in node_layer_indices:
-                out_layers[f"model.decoder_layers.{layer_idx}"] = layers[layer_idx]
-        
-        # Add final layers for last node
-        elif local_rank == num_nodes - 1:
-            # Get the indices for this node's layers
-            node_layer_indices = split_indices[local_rank].tolist()
-            
-            # Add decoder layers for this node
-            for layer_idx in node_layer_indices:
-                out_layers[f"model.decoder_layers.{layer_idx}"] = layers[layer_idx]
-            
-            if hasattr(model, 'layer_norm'):
-                out_layers["model.layer_norm"] = model.layer_norm
-            if hasattr(model, 'linear_layer'):
-                out_layers["model.lm_head"] = model.linear_layer
-            logger.info(f"Rank {local_rank}: Added layer_norm and lm_head")
-        
-        else:
-            # Get the indices for this node's layers
-            node_layer_indices = split_indices[local_rank].tolist()
-            
-            # Add decoder layers for this node
-            for layer_idx in node_layer_indices:
-                out_layers[f"model.decoder_layers.{layer_idx}"] = layers[layer_idx]
-        
-        logger.info(f"Rank {local_rank}: Added {len([k for k in out_layers.keys() if 'decoder_layers' in k])} decoder layers")
-    
+            out_layers["model.text_embeddings"] = TextEmbeddings(
+                vocab_size=vocab_size, embeddings_dims=embedding_dims, device=device
+            )
+            out_layers["model.router"] = Router(
+                embeddings_dims=embedding_dims, num_experts=num_experts,
+                top_k=top_k, device=device, noisy_topk=noisy_topk,
+            )
+            logger.info(f"Rank 0: built TextEmbeddings + Router")
+
+        # All ranks: ExpertBlocks for their shard (built fresh — not part of Mixtral)
+        for idx in expert_shard_indices:
+            out_layers[f"model.expert_{idx}"] = ExpertBlock(embedding_dims, device)
+        logger.info(f"Rank {local_rank}: built {len(expert_shard_indices)} ExpertBlocks (dim={embedding_dims})")
+
+        # Last rank: the full Mixtral transformer (attention + layernorm + lm_head)
+        if local_rank == num_nodes - 1:
+            out_layers["model.mixtral"] = model
+            logger.info(f"Rank {local_rank}: assigned Mixtral transformer from passed model")
+
     else:
         raise ValueError(f"Unknown model_type: {model_type}. Supported: 'causal_gpt2', 'causal_mixtral'")
-    
-    logger.info(f"Loaded layers: {list(out_layers.keys())}")
 
-    final_model = torch.nn.ModuleList(list(out_layers.values()))
-
-    return final_model, out_layers
+    logger.info(f"Rank {local_rank} layers: {list(out_layers.keys())}")
+    return torch.nn.ModuleList(list(out_layers.values())), out_layers
 
 
-def get_expert_per_node(local_rank: int, num_nodes: int, num_experts:  int) -> List[int]:
-    
+def get_expert_per_node(local_rank: int, num_nodes: int, num_experts: int) -> List[int]:
     assert local_rank < num_nodes, "local rank must be less than number of total nodes"
-    
+  
+
     expert_indices = torch.arange(num_experts)
     split_indices = torch.chunk(expert_indices, num_nodes)
     logger.info(f"Expert splits: {split_indices}")
-    
-    node_expert_indices = split_indices[local_rank].tolist()
-    
-    # out_experts = {}
-    
-    # for idx in node_expert_indices:
-    #     out_experts[f"expert_{idx}"] = expert_model
-        
-        
-    return node_expert_indices
-    
-    
+
+    return split_indices[local_rank].tolist()
+
+
+

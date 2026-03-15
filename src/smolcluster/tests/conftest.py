@@ -71,6 +71,42 @@ def top_k_experts():
     return 2
 
 
+# Expert Parallelism fixtures
+# model_dim=128, num_experts=4, num_nodes=2 → expert_dim=32, head_dim=32 (valid for RoPE)
+@pytest.fixture
+def ep_num_nodes():
+    """Number of worker nodes for EP testing."""
+    return 2
+
+
+@pytest.fixture
+def ep_num_experts():
+    """Number of experts (must be divisible by ep_num_nodes)."""
+    return 4
+
+
+@pytest.fixture
+def ep_top_k():
+    return 2
+
+
+@pytest.fixture
+def ep_model_dim():
+    """Embedding dim divisible by ep_num_experts and num_heads; head_dim must be even for RoPE."""
+    return 128  # 128 // 4 experts = 32 expert_dim; 128 // 4 heads = 32 head_dim (even)
+
+
+@pytest.fixture
+def ep_num_heads():
+    return 4
+
+
+@pytest.fixture
+def ep_activations(batch_size, small_seq_len, ep_model_dim):
+    """Pre-computed activations to feed into Mixtral (simulating expert output)."""
+    return torch.randn(batch_size, small_seq_len, ep_model_dim)
+
+
 # Configuration fixtures
 @pytest.fixture
 def dropout_rate():
