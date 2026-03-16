@@ -155,7 +155,7 @@ bash scripts/training/launch_ep_train_moe.sh
 bash scripts/launch_mp_train_gpt.sh
 
 # Inference
-bash scripts/inference/launch_mp_inference.sh
+bash scripts/inference/launch_inference.sh --algorithm mp
 bash scripts/inference/launch_api.sh
 ```
 
@@ -304,7 +304,7 @@ bash scripts/training/launch_ep_train_moe.sh --resume-checkpoint checkpoints/lat
 
 ```bash
 # Terminal 1: Start distributed inference server
-bash scripts/inference/launch_mp_inference.sh
+bash scripts/inference/launch_inference.sh --algorithm mp
 
 # Terminal 2: Start API and web interface
 bash scripts/inference/launch_api.sh

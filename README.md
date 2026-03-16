@@ -96,7 +96,7 @@ bash scripts/training/launch_ep_train_moe.sh
 Layer-wise model distribution. Best for large models and inference serving.
 
 ```bash
-bash scripts/inference/launch_mp_inference.sh
+bash scripts/inference/launch_inference.sh --algorithm mp
 bash scripts/inference/launch_api.sh
 ```
 

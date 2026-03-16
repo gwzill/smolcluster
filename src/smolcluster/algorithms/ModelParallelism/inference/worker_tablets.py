@@ -16,10 +16,11 @@ from smolcluster.utils.common_utils import (
 
 # Load configs
 CONFIG_DIR = Path(__file__).parent.parent.parent.parent / "configs"
-with open(CONFIG_DIR / "model_parallelism" / "model_config_inference.yaml") as f:
-    nn_config = yaml.safe_load(f)
+with open(CONFIG_DIR / "inference" / "model_config_inference.yaml") as f:
+    raw_config = yaml.safe_load(f)
+    nn_config = raw_config.get("mp", raw_config)
 
-with open(CONFIG_DIR / "model_parallelism" / "cluster_config_inference.yaml") as f:
+with open(CONFIG_DIR / "inference" / "cluster_config_inference.yaml") as f:
     cluster_config = yaml.safe_load(f)
 
 # Extract values with defaults
@@ -75,7 +76,7 @@ logger.info(f"  -> Server connection: {SERVER_IP}:{SERVER_PORT}")
 logger.info(f"  -> Tablet device connection: {TABLET_IP}:{TABLET_PORT}")
 
 # Initialize model
-model_name = "causal_gpt2"  # Set model name
+model_name = nn_config.get("active_model", "causal_gpt2")
 model_config = nn_config[model_name]  # Get nested config
 
 # Note: Tablet proxy doesn't load model - actual tablet device does the computation

@@ -1,10 +1,11 @@
 """
-FastAPI backend for chat application with Model Parallelism server.
+FastAPI backend for chat application.
 Handles user input and communicates with the distributed inference server.
 """
 
 import json
 import logging
+import os
 import socket
 import time
 from pathlib import Path
@@ -27,18 +28,38 @@ from smolcluster.utils.common_utils import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load model config
+# Load inference configuration
 CONFIG_DIR = Path(__file__).parent.parent.parent / "configs"
-with open(CONFIG_DIR / "inference" / "model_parallelism" / "model_config_inference.yaml") as f:
+INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "model_parallelism")
+
+backend_model_cfg = (
+    CONFIG_DIR / "inference" / INFERENCE_BACKEND / "model_config_inference.yaml"
+)
+flat_model_cfg = CONFIG_DIR / "inference" / "model_config_inference.yaml"
+
+model_cfg_path = backend_model_cfg if backend_model_cfg.exists() else flat_model_cfg
+with open(model_cfg_path) as f:
     model_configs = yaml.safe_load(f)
 
+if INFERENCE_BACKEND == "data_parallelism":
+    model_configs = model_configs.get("dp", model_configs)
+    if "hf_model_name" in model_configs:
+        model_config = model_configs
+    else:
+        model_name = model_configs.get("active_model", "causal_gpt2")
+        model_config = model_configs[model_name]
+else:
+    model_configs = model_configs.get("mp", model_configs)
+    model_name = model_configs.get("active_model", "causal_gpt2")
+    model_config = model_configs[model_name]
+
 # Load cluster config for web interface ports and server connection
-with open(CONFIG_DIR / "inference" / "model_parallelism" / "cluster_config_inference.yaml") as f:
+with open(CONFIG_DIR / "inference" / "cluster_config_inference.yaml") as f:
     cluster_config = yaml.safe_load(f)
 
-# Get active model config (default to causal_gpt2)
-MODEL_NAME = "causal_gpt2"
-model_config = model_configs[MODEL_NAME]
+# Get active model config name for metadata endpoints.
+MODEL_NAME = model_configs.get("active_model", "hf_model")
+MODEL_DISPLAY_NAME = model_config.get("hf_model_name", MODEL_NAME)
 
 app = FastAPI(title="SmolCluster Chat API")
 
@@ -56,12 +77,14 @@ server_socket: Optional[socket.socket] = None
 
 # Get server connection details from cluster config
 server_hostname = cluster_config["server"]
-SERVER_HOST = cluster_config["host_ip"][server_hostname]
+SERVER_HOST = os.getenv("INFERENCE_SERVER_HOST", cluster_config["host_ip"][server_hostname])
 port_config = cluster_config["port"]
 if isinstance(port_config, dict):
-    SERVER_PORT = port_config.get(server_hostname, port_config.get("default", 65432))
+    default_port = port_config.get(server_hostname, port_config.get("default", 65432))
 else:
-    SERVER_PORT = port_config
+    default_port = port_config
+
+SERVER_PORT = int(os.getenv("INFERENCE_SERVER_PORT", default_port))
 
 # Get web interface port from cluster config
 API_PORT = cluster_config["web_interface"]["api_port"]
@@ -181,7 +204,8 @@ async def get_config():
         "frontend_port": cluster_config["web_interface"]["frontend_port"],
         "server_host": SERVER_HOST,
         "server_port": SERVER_PORT,
-        "model_name": MODEL_NAME,
+        "inference_backend": INFERENCE_BACKEND,
+        "model_name": MODEL_DISPLAY_NAME,
         "max_new_tokens": model_config["max_new_tokens"],
         "decoding_strategy": active_strategy,
         "temperature": strategy_params.get("temperature", 1.0),

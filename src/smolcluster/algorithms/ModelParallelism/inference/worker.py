@@ -16,10 +16,11 @@ from smolcluster.utils.model_downloader import ensure_model_weights
 # Load configs
 CONFIG_DIR = Path(__file__).parent.parent.parent.parent / "configs"
 
-with open(CONFIG_DIR / "model_parallelism" / "model_config_inference.yaml") as f:
-    nn_config = yaml.safe_load(f)
+with open(CONFIG_DIR / "inference" / "model_config_inference.yaml") as f:
+    raw_config = yaml.safe_load(f)
+    nn_config = raw_config.get("mp", raw_config)
 
-with open(CONFIG_DIR / "model_parallelism" / "cluster_config_inference.yaml") as f:
+with open(CONFIG_DIR / "inference" / "cluster_config_inference.yaml") as f:
     cluster_config = yaml.safe_load(f)
 
 # Extract values with defaults
@@ -61,7 +62,7 @@ logger = logging.getLogger(f"[WORKER-{local_rank}]")
 logger.info(f"Worker {local_rank} starting. Connecting to server at {HOST_IP}:{PORT}")
 
 # Initialize model
-model_name = "causal_gpt2"  # Set model name
+model_name = nn_config.get("active_model", "causal_gpt2")
 model_config = nn_config[model_name]  # Get nested config
 hf_model_name = model_config["hf_model_name"]
 num_nodes = model_config["num_nodes"]

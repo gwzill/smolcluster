@@ -226,7 +226,7 @@ For convenience, use the provided launch script to start the entire distributed 
 
 ```bash
 cd ~/Desktop/smolcluster/scripts/inference
-./launch_mp_inference.sh
+./launch_inference.sh --algorithm mp
 ```
 
 This script automatically:

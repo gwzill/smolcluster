@@ -187,9 +187,7 @@
         
         <div class="chat-messages" id="chatMessages">
             <div class="message assistant">
-                <div class="message-content">
-                    Hi! I'm powered by a distributed GPT model. Ask me anything!
-                </div>
+                <div class="message-content" id="welcomeMessage">Hi! Ask me anything!</div>
             </div>
         </div>
         
@@ -211,6 +209,7 @@
         const chatInput = document.getElementById('chatInput');
         const sendButton = document.getElementById('sendButton');
         const statusDiv = document.getElementById('status');
+        const welcomeMessageDiv = document.getElementById('welcomeMessage');
         
         let isProcessing = false;
         let modelConfig = {
@@ -228,6 +227,19 @@
                 if (response.ok) {
                     const config = await response.json();
                     modelConfig = config;
+                    if (welcomeMessageDiv) {
+                        const backend = config.inference_backend || '';
+                        const modelName = config.model_name || '';
+                        if (backend === 'model_parallelism') {
+                            welcomeMessageDiv.textContent = modelName
+                                ? `Hi! I am powered by distributed ${modelName}. Ask me anything!`
+                                : 'Hi! Ask me anything!';
+                        } else {
+                            welcomeMessageDiv.textContent = modelName
+                                ? `Hi! I am powered by ${modelName}. Ask me anything!`
+                                : 'Hi! Ask me anything!';
+                        }
+                    }
                     console.log('Loaded model config:', config);
                 }
             } catch (error) {

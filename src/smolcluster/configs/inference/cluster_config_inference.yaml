@@ -46,16 +46,14 @@ timeout: 0.1  # How long server waits for gradients (seconds)
 seed: 42
 
 # Cluster configuration
-num_workers: 2
-server: mini2  # Server hostname
+num_workers: 1
+server: mini1  # Server hostname
 workers:
   regular:
-    - hostname: mini3
-      rank: 2
-  tablets:
-    - hostname: ipad
+    - hostname: mini2
       rank: 1
 
+#-------------------------------------------------------------------------
 #Model parallelism specific configs
 num_nodes: 3
 num_layers: 6  # Number of transformer blocks (auto-detected from model, this is just for reference)

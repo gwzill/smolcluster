@@ -590,7 +590,7 @@ Deploy the complete distributed inference stack with one command:
 
 ```bash
 cd ~/Desktop/smolcluster/scripts/inference
-./launch_mp_inference.sh
+./launch_inference.sh --algorithm mp
 ```
 
 **This script automatically:**
