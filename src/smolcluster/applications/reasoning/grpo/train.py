@@ -92,12 +92,6 @@ def compute_grpo_loss(ref_logprobs: torch.Tensor, curr_logprobs: torch.Tensor, a
     return loss
 
 
-train_ds = load_dataset("gsm8k", split="train")
-val_ds = load_dataset("gsm8k", split="validation")
-
-questions = train_ds["train"]["question"]
-answers = train_ds["train"].map(lambda x: {"answer": extract_answer_from_gsm8k(x["answer"])})["answer"]
-
 
 def train():
     
@@ -116,7 +110,19 @@ def train():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            pass
             
         
 
 
+def main():
+    
+    
+    train_ds = load_dataset("gsm8k", split="train")
+    val_ds = load_dataset("gsm8k", split="validation")
+
+    questions = train_ds["train"]["question"]
+    answers = train_ds["train"].map(lambda x: {"answer": extract_answer_from_gsm8k(x["answer"])})["answer"]
+
+if __name__ == "__main__":  
+    main()

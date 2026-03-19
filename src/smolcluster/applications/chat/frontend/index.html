@@ -335,7 +335,7 @@
             <div class="header-status">
                 <div class="status" id="status">Connecting...</div>
                 <div class="status" id="redisStatus">Redis: checking...</div>
-                <button id="clearChatsButton" type="button">Clear Chats</button>
+                <button id="clearChatsButton" type="button">Clear This Chat</button>
             </div>
         </div>
 
@@ -866,14 +866,15 @@
             if (isProcessing) return;
 
             const algo = modelConfig.inference_architecture || 'unknown';
-            const workerRanks = Array.isArray(modelConfig.available_worker_ranks) && modelConfig.available_worker_ranks.length > 0
-                ? modelConfig.available_worker_ranks
-                : [parseInt(workerSelect.value || '0', 10)];
+            const selectedRank = parseInt(workerSelect.value || '0', 10);
+            if (Number.isNaN(selectedRank)) {
+                addMessage('Failed to clear chats: invalid worker selection', 'error');
+                return;
+            }
 
-            const uniqueRanks = [...new Set(workerRanks.map((r) => parseInt(r, 10)).filter((r) => !Number.isNaN(r)))];
-            const sessionIds = uniqueRanks.map((rank) => `${algo}-${browserSessionId}-worker-${rank}`);
+            const sessionId = `${algo}-${browserSessionId}-worker-${selectedRank}`;
 
-            const confirmMsg = `Clear all chats for ${algo} across ${uniqueRanks.length} target(s)?`;
+            const confirmMsg = `Clear chat for ${algo} target ${selectedRank}?`;
             if (!window.confirm(confirmMsg)) {
                 return;
             }
@@ -888,7 +889,7 @@
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ session_ids: sessionIds }),
+                    body: JSON.stringify({ session_ids: [sessionId] }),
                 });
 
                 if (!response.ok) {
