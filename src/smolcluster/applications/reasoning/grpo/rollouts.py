@@ -1,63 +1,85 @@
 import requests
 from typing import Dict
 import threading
+import yaml
 
 lock = threading.Lock()
-rollouts = {}
 
-with open("configs/inference/model_config_inference.yaml") as f:
-    model_config = yaml.safe_load(f)
+with open("configs/inference/reasoning/grpo/config.yaml") as f:
+    grpo_config = yaml.safe_load(f)
 
-def query(url: str, payload: Dict, prompt: str, decoding_strategy: str, max_tokens: int) -> str:
-    
-   
+API_URL = grpo_config["api_url"]
+NUM_ROLLOUTS = grpo_config["num_rollouts"]
+
+def query(url: str, payload: Dict) -> Dict:
+    """Query the inference API."""
     response = requests.post(url, json=payload)
     return response.json()
 
-def handle_worker(url: str, payload: Dict, prompt: str, worker_rank: int, decoding_strategy: str, max_tokens: int, rollouts: Dict[int, str], lock: threading.Lock) -> str:
-    
-    response = query(url, payload, prompt, decoding_strategy, max_tokens)
+
+def handle_worker_rollout(
+    url: str,
+    payload: Dict,
+    worker_rank: int,
+    rollout_idx: int,
+    rollouts: Dict,
+    lock: threading.Lock,
+) -> None:
+    """Generate a single rollout for a worker and store result."""
+    response = query(url, payload)
     
     with lock:
-        rollouts[worker_rank] = response["generated_text"]
-  
-  
-def generate_rollouts(prompt: str, decoding_strategy: str, max_tokens: int, rollouts: Dict[int, str], lock: threading.Lock) -> list[str]:
-    threads = []  # Store thread references
+        if worker_rank not in rollouts:
+            rollouts[worker_rank] = [None] * NUM_ROLLOUTS
+        rollouts[worker_rank][rollout_idx] = response["generated_text"]
+
+
+def generate_rollouts_for_prompt(
+    prompt: str,
+    num_workers: int,
+    decoding_strategy: str,
+    max_tokens: int,
+) -> Dict[int, list[str]]:
+    """Generate NUM_ROLLOUTS outputs from each worker for a single prompt."""
+    threads = []
+    rollouts = {}
     
-    for worker_rank in range(3):
-        url = "http://localhost:8080/query" 
-        
-        payload = {
-            "text": prompt,
-            "worker_rank": worker_rank,
-            "max_tokens": max_tokens,
-            "decoding_strategy": decoding_strategy,
-        }
-         
-        thread = threading.Thread(
-            target=handle_worker, 
-            args=(url, payload, prompt, worker_rank, decoding_strategy, max_tokens, rollouts, lock)
-        )  
-        thread.start()
-        threads.append(thread)  # Keep reference
+    for worker_rank in range(num_workers):
+        for rollout_idx in range(NUM_ROLLOUTS):
+            
+            payload = {
+                "text": prompt,
+                "worker_rank": worker_rank,
+                "max_tokens": max_tokens,
+                "decoding_strategy": decoding_strategy,
+            }
+            
+            thread = threading.Thread(
+                target=handle_worker_rollout,
+                args=(API_URL, payload, worker_rank, rollout_idx, rollouts, lock),
+            )
+            thread.start()
+            threads.append(thread)
     
-    # Wait for all threads to complete before returning
+    # Wait for all threads to complete
     for thread in threads:
         thread.join()
-        
-def main():
+    
+    return rollouts
 
+
+def generate_rollouts(
+    prompt: str,
+    num_workers: int,
+    decoding_strategy: str = "top_p",
+    max_tokens: int = 256,
+) -> Dict[int, list[str]]:
+    """
+    Generate NUM_ROLLOUTS outputs from each worker for a prompt.
     
-    prompt = "What is the capital of France?"
-    decoding_strategy = "top_p"
-    max_tokens = 256
-    
-    main_thread = threading.Thread(target=generate_rollouts, args=(prompt, decoding_strategy, max_tokens, rollouts, lock))
-    main_thread.start()
-    main_thread.join()
-    
-    
-    
-if __name__ == "__main__":
-    main()
+    Returns:
+        Dict mapping worker_rank -> list of NUM_ROLLOUTS generated texts
+    """
+    return generate_rollouts_for_prompt(
+        prompt, num_workers, decoding_strategy, max_tokens
+    )

@@ -1,6 +1,6 @@
 import re
 
-def calculate_reward(predicted_answer: float, true_answer: float) -> float:
+def calculate_answer_reward(predicted_answer: float, true_answer: float) -> float:
     """
     Calculate the reward based on the predicted answer and the true answer.
 

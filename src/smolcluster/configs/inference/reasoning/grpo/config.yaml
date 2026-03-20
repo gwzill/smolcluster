@@ -1,2 +1,13 @@
+# GRPO (Group Relative Policy Optimization) Configuration
+
+# Training hyperparameters
 kl_beta: 0.0001
 clip_ratio: 0.2
+learning_rate: 5e-5
+num_epochs: 3
+batch_size: 4
+
+# Rollout generation
+api_url: "http://localhost:8080/query"  # Inference API endpoint
+num_rollouts: 4  # Number of rollouts per prompt per worker
+vllm: true  # Whether to use vLLM for rollout generation (if false, uses HF Transformers)

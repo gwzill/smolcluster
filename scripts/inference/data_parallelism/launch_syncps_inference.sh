@@ -48,6 +48,20 @@ if [[ "$ACTUAL_WORKER_COUNT" -ne "$NUM_WORKERS" ]]; then
     exit 1
 fi
 
+# Validate total_num_nodes: SyncPS has 1 dedicated server + workers, so server counts as a node.
+SYNCPS_TOTAL_NUM_NODES=$(yq '.total_num_nodes' "$CONFIG_FILE" 2>/dev/null)
+SYNCPS_ACTUAL_NODES=$((ACTUAL_WORKER_COUNT + 1))  # +1 for server
+if [[ -n "$SYNCPS_TOTAL_NUM_NODES" && "$SYNCPS_TOTAL_NUM_NODES" != "null" ]]; then
+    if [[ "$SYNCPS_ACTUAL_NODES" -ne "$SYNCPS_TOTAL_NUM_NODES" ]]; then
+        echo "❌ Node count mismatch for SyncPS:"
+        echo "   total_num_nodes=$SYNCPS_TOTAL_NUM_NODES (cluster_config_inference.yaml)"
+        echo "   server (1) + workers ($ACTUAL_WORKER_COUNT) = $SYNCPS_ACTUAL_NODES"
+        echo "   SyncPS: server + workers must equal total_num_nodes."
+        exit 1
+    fi
+    echo "✅ Node count OK: 1 server + $ACTUAL_WORKER_COUNT workers == total_num_nodes=$SYNCPS_TOTAL_NUM_NODES"
+fi
+
 # Sync code to all remote SyncPS nodes (server + regular workers) before launch.
 SSH_NODES=("$SERVER")
 for worker_entry in "${REGULAR_WORKERS[@]}"; do
