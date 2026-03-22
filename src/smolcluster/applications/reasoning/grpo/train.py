@@ -56,7 +56,7 @@ def _sequence_logprobs_from_logits(
     gathered = token_logprobs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
 
     masked_logprobs = gathered * shift_mask
-    token_counts = shift_mask.sum(dim=1).clamp(min=1.0)
+    token_counts = shift_mask.sum(dim=1)
     return masked_logprobs.sum(dim=1) / token_counts
 
 
@@ -112,9 +112,9 @@ def build_batched_rollout_texts(
         prompt = PROMPT.format(question=question)
         worker_rollouts = generate_rollouts_vllm(
             prompt,
-            config["num_workers"],
-            config["decoding_strategy"],
-            config["max_tokens"],
+            decoding_strategy=config.get("decoding_strategy", "top_p"),
+            max_tokens=config.get("max_tokens", 256),
+            num_rollouts=config["num_rollouts"],
         )
         prompt_rollouts = organize_rollouts(worker_rollouts)
         rollout_texts.extend(prompt_rollouts)

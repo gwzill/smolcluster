@@ -17,7 +17,24 @@ data:
   val_split: "test"
 
 # Rollout generation
-api_url: "http://localhost:8080/query"  # Inference API endpoint
-vllm_completion_url: "http://localhost:8000/v1/completions"  # vLLM OpenAI-compatible completion endpoint
+max_tokens: 2048
 num_rollouts: 4  # Number of rollouts per prompt per worker
 vllm: true  # Whether to use vLLM for rollout generation (if false, uses HF Transformers)
+
+# Used when `vllm: true`: the training server sends rollout requests to worker-node vLLM servers.
+vllm_cluster:
+  host_ip:
+    mini1: "10.10.0.1"
+    mini2: "10.10.0.2"
+    mini3: "10.10.0.3"
+  num_workers: 2
+  total_num_nodes: 3
+  server: mini1  # Server hostname (rank 0 for SyncPS inference/vLLM)
+  workers:
+    regular:
+      - hostname: mini2
+        rank: 1
+      - hostname: mini3
+        rank: 2
+  port: 8000
+  completion_path: "/v1/completions"
