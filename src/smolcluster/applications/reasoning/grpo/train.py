@@ -1,5 +1,7 @@
+import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -22,14 +24,12 @@ from smolcluster.applications.reasoning.grpo.utils import (
     _add_grads,
     _log_mem,
     _scale_grads,
-    clip_grad_norm,
-    compute_grad_norm,
     get_dtype_from_config,
     get_mlx_device,
     iterate_batches,
     load_model,
     tokenize_rollouts,
-    parse_numeric_answer
+    parse_numeric_answer,
 )
 from smolcluster.applications.reasoning.grpo.worker_sync import (
     save_policy_weights,
@@ -49,6 +49,17 @@ with open(grpo_config_path) as f:
 
 with open(model_config_path) as f:
     model_config = yaml.safe_load(f)
+
+_debug_dir = _module_dir.parents[4] / ".grpo_debug"
+_debug_dir.mkdir(parents=True, exist_ok=True)
+_answers_log_path = _debug_dir / "rollout_answers.jsonl"
+_answers_log_lock = threading.Lock()
+
+
+def _append_answers_log(record: dict) -> None:
+    with _answers_log_lock:
+        with _answers_log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, indent=2) + "\n\n")
 
 def compute_ratio_stats(
     curr_logprobs: mx.array,
@@ -116,7 +127,7 @@ def compute_logprobs(
         logits = model(ids)
         _log_mem("compute_logprobs._forward: after logits [B,T,vocab]")
         
-        shift_logits = logits[:, :-1, :].astype(dtype)
+        shift_logits = logits[:, :-1, :].to(dtype)
         shift_labels = ids[:, 1:]
         log_probs = nn.log_softmax(shift_logits, axis=-1)
         _log_mem("compute_logprobs._forward: after log_softmax [B,T,vocab]")
@@ -126,12 +137,14 @@ def compute_logprobs(
         token_logprobs = mlx_grad_checkpoint(model, _forward)(input_ids)
     else:
         token_logprobs = _forward(input_ids)
-
-    # Mask out padding tokens — use mx.where instead of multiplication to avoid
-    # -inf * 0 = NaN when log_softmax produces -inf at low-prob positions
-    token_logprobs = mx.where(shift_mask > 0, token_logprobs, mx.zeros_like(token_logprobs))
-    token_counts = mx.maximum(mx.sum(shift_mask, axis=1), 1.0)
-    return mx.sum(token_logprobs, axis=1) / token_counts
+    
+    valid_mask = mx.isfinite(token_logprobs)
+    non_nan_logprobs = mx.where(valid_mask, token_logprobs, 0.0)
+    
+    non_mask_logprobs = mx.where(shift_mask, non_nan_logprobs, 0.0)
+    counts = mx.sum(shift_mask, axis=1)
+    
+    return mx.sum(non_mask_logprobs, axis=1) / counts
 
 
 def compute_rewards(
@@ -141,11 +154,23 @@ def compute_rewards(
     device: mx.Device = mx.cpu,
 ) -> mx.array:
     reward_values: List[float] = []
-    for generated_text, target_answer in zip(rollout_texts, rollout_targets):
+    log_records: List[dict] = []
+    for i, (generated_text, target_answer) in enumerate(zip(rollout_texts, rollout_targets)):
         predicted_numeric_answer = parse_numeric_answer(generated_text)
         answer_reward = calculate_answer_reward(predicted_numeric_answer, target_answer)
         format_reward = calculate_formatted_reward(generated_text)
-        reward_values.append(float(answer_reward + format_reward))
+        total_reward = float(answer_reward + format_reward)
+        reward_values.append(total_reward)
+        log_records.append({
+            "rollout_idx":        i,
+            "true_answer":        target_answer,
+            "extracted_answer":   str(predicted_numeric_answer),
+            "answer_reward":      float(answer_reward),
+            "format_reward":      float(format_reward),
+            "total_reward":       total_reward,
+            "generated_text":     generated_text,
+        })
+    _append_answers_log({"rollouts": log_records})
 
     # Move reward tensor to the configured device
     with mx.stream(mx.default_stream(device)):
@@ -461,10 +486,10 @@ def train(
             
             # --- Apply optimizer update after gradient accumulation ---
             max_grad_norm = float(config.get("max_grad_norm") or 0)
-            if max_grad_norm > 0:
-                accum_grads, grad_norm = clip_grad_norm(accum_grads, max_grad_norm, dtype=dtype, device=device)
-            else:
-                grad_norm = compute_grad_norm(accum_grads, dtype=dtype, device=device)
+            clip_max = max_grad_norm if max_grad_norm > 0 else float("inf")
+            accum_grads, grad_norm = optim.clip_grad_norm(accum_grads, clip_max)
+            mx.eval(grad_norm)
+            grad_norm = float(grad_norm)
             optimizer.update(model, accum_grads)
             mx.eval(model.parameters(), optimizer.state)
             global_step += 1
@@ -530,6 +555,10 @@ def train(
 
 
 def main() -> None:
+    
+    for _log in [_answers_log_path, _debug_dir / "vllm_rollouts.jsonl"]:
+        _log.write_text("", encoding="utf-8")
+        
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 

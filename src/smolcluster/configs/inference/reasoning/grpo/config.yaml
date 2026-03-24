@@ -1,11 +1,11 @@
 # GRPO (Group Relative Policy Optimization) Configuration
 
 # Model configuration
-dtype: "bfloat16"  # "float32" or "bfloat16" for all computations
+dtype: "float16"  # "float32" or "bfloat16" for all computations
 
 # Training hyperparameters
 device: "gpu"
-use_kl: false           # use vLLM old_logprobs for clipped-ratio PPO (no ref_model loaded when vllm=true)
+use_kl: true           # use vLLM old_logprobs for clipped-ratio PPO (no ref_model loaded when vllm=true)
 kl_beta: 0.0001           # 0 = pure clipped-ratio PPO; raise to ~0.01 to add KL penalty term
 clip_ratio: 0.2
 max_grad_norm: 1.0    # gradient clipping threshold (0 or null to disable)
@@ -13,7 +13,7 @@ learning_rate: 0.0001
 num_epochs: 3
 batch_size: 2
 grad_accum_steps: 1    # accumulate gradients over N micro-batches before each optimizer step (1 = disabled)
-val_steps: 50
+val_steps: 200
 grad_checkpoint: true  
 grad_chunk_size: 4      # Process this many rollouts at a time during backward (reduces peak vocab-dim tensor size)
 
@@ -26,7 +26,7 @@ data:
 
 # Rollout generation
 max_tokens: 512
-num_rollouts: 8  # Number of rollouts per prompt per worker
+num_rollouts: 4  # Number of rollouts per prompt per worker
 vllm: true  # Whether to use vLLM for rollout generation (if false, uses HF Transformers)
 
 # Used when `vllm: true`: the training server sends rollout requests to worker-node vLLM servers.

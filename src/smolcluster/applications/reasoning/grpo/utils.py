@@ -5,7 +5,6 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import re
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 from mlx_lm import load as mlx_load
@@ -104,26 +103,6 @@ def tokenize_rollouts(
 # Gradient utilities
 # ---------------------------------------------------------------------------
 
-def compute_grad_norm(grads: Any, dtype: type = mx.float32, device: mx.Device = mx.cpu) -> float:
-    with mx.stream(mx.default_stream(device)):
-        total = mx.array(0.0, dtype=dtype)
-    for _name, grad in tree_flatten(grads):
-        total = total + mx.sum(mx.square(grad.astype(dtype)))
-    return float(mx.sqrt(total).item())
-
-
-def clip_grad_norm(
-    grads: Any,
-    max_norm: float,
-    dtype: type = mx.float32,
-    device: mx.Device = mx.cpu,
-) -> Tuple[Any, float]:
-    """Clip gradients by global norm. Returns (clipped_grads, norm)."""
-    norm = compute_grad_norm(grads, dtype=dtype, device=device)
-    if norm > max_norm:
-        grads = _scale_grads(grads, max_norm / norm)
-    return grads, norm
-
 
 def _scale_grads(grads: Any, scale: float) -> Any:
     return tree_unflatten([(k, v * scale) for k, v in tree_flatten(grads)])
@@ -177,15 +156,14 @@ def load_model(
         mx.eval(model.parameters())
     _log_mem("load_model: after policy model load")
 
-    # When vllm=true, old logprobs come free from vLLM sampling — no ref_model needed.
     ref_model: Optional[Any] = None
     if config.get("use_kl", True):
-        logger.info("Loading reference model (use_kl=true, vllm=false) ...")
+        logger.info("Loading reference model (use_kl=true) ...")
         ref_model, _ = mlx_load(model_name, tokenizer_config=tokenizer_config)
         ref_model.eval()
         with mx.stream(device_stream):
             mx.eval(ref_model.parameters())
     else:
-        logger.info("Skipping reference model load (vllm=true — old logprobs come from vLLM)")
+        logger.info("Skipping reference model load (use_kl=false)")
 
     return model, ref_model, tokenizer
