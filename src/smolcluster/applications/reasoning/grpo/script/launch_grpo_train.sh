@@ -30,6 +30,7 @@ if [[ -z "$PROJECT_DIR" ]]; then
 fi
 
 GRPO_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/reasoning/grpo/config.yaml"
+CLUSTER_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_inference.yaml"
 SESSION_NAME="grpo_train"
 
 DRY_RUN=false
@@ -94,6 +95,10 @@ if [[ ! -f "$GRPO_CONFIG" ]]; then
     echo "Error: GRPO config not found: $GRPO_CONFIG"
     exit 1
 fi
+if [[ ! -f "$CLUSTER_CONFIG" ]]; then
+    echo "Error: cluster config not found: $CLUSTER_CONFIG"
+    exit 1
+fi
 
 VLLM_ENABLED=$(yq '.vllm' "$GRPO_CONFIG")
 if [[ "$VLLM_ENABLED" != "true" ]]; then
@@ -101,16 +106,18 @@ if [[ "$VLLM_ENABLED" != "true" ]]; then
     exit 1
 fi
 
-NUM_WORKERS=$(yq '.vllm_cluster.num_workers' "$GRPO_CONFIG")
-TOTAL_NUM_NODES=$(yq '.vllm_cluster.total_num_nodes' "$GRPO_CONFIG")
-SERVER_HOST=$(yq '.vllm_cluster.server' "$GRPO_CONFIG")
+# Cluster topology comes from cluster_config_inference.yaml
+NUM_WORKERS=$(yq '.num_workers' "$CLUSTER_CONFIG")
+TOTAL_NUM_NODES=$(yq '.total_num_nodes' "$CLUSTER_CONFIG")
+SERVER_HOST=$(yq '.server' "$CLUSTER_CONFIG")
+# vLLM endpoint details stay in grpo config
 VLLM_PORT=$(yq '.vllm_cluster.port' "$GRPO_CONFIG")
 COMPLETION_PATH=$(yq '.vllm_cluster.completion_path' "$GRPO_CONFIG")
 
 WORKER_ENTRIES=()
 while IFS= read -r entry; do
     [[ -n "$entry" ]] && WORKER_ENTRIES+=("$entry")
-done < <(yq '.vllm_cluster.workers.regular[] | .hostname + ":" + (.rank | tostring)' "$GRPO_CONFIG")
+done < <(yq '.workers.regular[] | .hostname + ":" + (.rank | tostring)' "$CLUSTER_CONFIG")
 
 WORKER_HOSTS=()
 WORKER_RANKS=()
@@ -147,7 +154,7 @@ if [[ "$DRY_RUN" == "false" ]]; then
     for i in "${!WORKER_HOSTS[@]}"; do
         worker="${WORKER_HOSTS[$i]}"
         rank="${WORKER_RANKS[$i]}"
-        worker_ip=$(yq ".vllm_cluster.host_ip.${worker}" "$GRPO_CONFIG")
+        worker_ip=$(yq ".host_ip.${worker}" "$CLUSTER_CONFIG")
         if [[ -z "$worker_ip" || "$worker_ip" == "null" ]]; then
             echo "Error: missing host_ip mapping for worker: $worker"
             exit 1
@@ -185,13 +192,37 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     fi
 fi
 
-TRAIN_CMD="cd $PROJECT_DIR && uv run python -m smolcluster.applications.reasoning.grpo.train"
+TRAIN_SCRIPT="$PROJECT_DIR/src/smolcluster/applications/reasoning/grpo/train.py"
+VENV_ACTIVATE="$PROJECT_DIR/.venv/bin/activate"
+
+if [[ ! -f "$VENV_ACTIVATE" ]]; then
+    echo "Error: .venv not found at $PROJECT_DIR/.venv"
+    echo "Run 'uv sync --extra mlx' inside $PROJECT_DIR to create it."
+    exit 1
+fi
+
+echo "Installing dependencies..."
+cd "$PROJECT_DIR"
+uv pip install -e .
+
+HF_ENV_SETUP=""
+# Prefer HF_TOKEN if provided, otherwise preserve an existing HUGGING_FACE_HUB_TOKEN.
+if [[ -n "${HF_TOKEN:-}" ]]; then
+    HF_ENV_SETUP="export HUGGING_FACE_HUB_TOKEN=\"${HF_TOKEN}\"; export HF_TOKEN=\"${HF_TOKEN}\"; "
+elif [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
+    HF_ENV_SETUP="export HUGGING_FACE_HUB_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; export HF_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; "
+fi
+# Enable the faster HF transfer path when available.
+HF_ENV_SETUP+="export HF_HUB_ENABLE_HF_TRANSFER=1; "
+
+TRAIN_CMD="source \"$VENV_ACTIVATE\" && ${HF_ENV_SETUP}python \"$TRAIN_SCRIPT\""
+TMUX_CMD="bash -lc '$TRAIN_CMD; status=\$?; echo; echo Training exited with status \$status.; echo Session kept open for inspection.; exec bash -i'"
 
 echo "Launching GRPO training on server node ($SERVER_HOST)"
 if [[ "$DRY_RUN" == "true" ]]; then
-    echo "Dry run command: tmux new -d -s $SESSION_NAME \"bash -lc '$TRAIN_CMD'\""
+    echo "Dry run command: tmux new -d -s $SESSION_NAME \"$TMUX_CMD\""
 else
-    tmux new -d -s "$SESSION_NAME" "bash -lc '$TRAIN_CMD'"
+    tmux new -d -s "$SESSION_NAME" "$TMUX_CMD"
     echo "Started tmux session: $SESSION_NAME"
     echo "Attach with: tmux attach -t $SESSION_NAME"
 fi

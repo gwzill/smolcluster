@@ -27,6 +27,8 @@ dependencies = [
     "coremltools>=9.0",
     "python-dotenv>=1.2.1",
     "redis>=5.0.0",
+    "mlx-lm",
+    "mlx"
 ]
 
 [project.optional-dependencies]

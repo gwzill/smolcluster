@@ -1,13 +1,21 @@
 # GRPO (Group Relative Policy Optimization) Configuration
 
+# Model configuration
+dtype: "bfloat16"  # "float32" or "bfloat16" for all computations
+
 # Training hyperparameters
-device: "cpu"
-kl_beta: 0.0001
+device: "gpu"
+use_kl: false           # use vLLM old_logprobs for clipped-ratio PPO (no ref_model loaded when vllm=true)
+kl_beta: 0.0001           # 0 = pure clipped-ratio PPO; raise to ~0.01 to add KL penalty term
 clip_ratio: 0.2
-learning_rate: 5e-5
+max_grad_norm: 1.0    # gradient clipping threshold (0 or null to disable)
+learning_rate: 0.0001
 num_epochs: 3
-batch_size: 4
+batch_size: 2
+grad_accum_steps: 1    # accumulate gradients over N micro-batches before each optimizer step (1 = disabled)
 val_steps: 50
+grad_checkpoint: true  
+grad_chunk_size: 4      # Process this many rollouts at a time during backward (reduces peak vocab-dim tensor size)
 
 # Dataset
 data:
@@ -17,24 +25,34 @@ data:
   val_split: "test"
 
 # Rollout generation
-max_tokens: 2048
-num_rollouts: 4  # Number of rollouts per prompt per worker
+max_tokens: 512
+num_rollouts: 8  # Number of rollouts per prompt per worker
 vllm: true  # Whether to use vLLM for rollout generation (if false, uses HF Transformers)
 
 # Used when `vllm: true`: the training server sends rollout requests to worker-node vLLM servers.
+# Workers, host_ip, and user are read from cluster_config_inference.yaml
 vllm_cluster:
-  host_ip:
-    mini1: "10.10.0.1"
-    mini2: "10.10.0.2"
-    mini3: "10.10.0.3"
-  num_workers: 2
-  total_num_nodes: 3
-  server: mini1  # Server hostname (rank 0 for SyncPS inference/vLLM)
-  workers:
-    regular:
-      - hostname: mini2
-        rank: 1
-      - hostname: mini3
-        rank: 2
   port: 8000
   completion_path: "/v1/completions"
+
+# ---------------------------------------------------------------------------
+# Weight sync: save policy weights and reload vLLM workers periodically.
+# Set save_steps: 0 to disable.robs
+# ---------------------------------------------------------------------------
+weight_sync:
+  save_steps: 50                    # sync every N training steps (0 = disabled)
+  checkpoint_dir: "checkpoints/grpo"  # relative to project root
+
+  # remote_user and host_ip are read from model_config_inference.yaml cluster.*
+  remote_model_dir: "~/grpo_model"  
+  vllm_activate: "~/.venv-vllm-metal/bin/activate"  # sourced before vLLM restart on workers
+  remote_weights_filename: "model.safetensors"  # weights file to overwrite
+
+  # Command used to (re)start vLLM on each worker.
+  # Placeholders: {model_dir}, {port}, {rank}
+  vllm_start_cmd: >-
+    nohup vllm serve {model_dir} --port {port} --trust-remote-code --enable-prefix-caching
+    > /tmp/vllm_{rank}.log 2>&1 &
+
+  health_retries: 30                # polling attempts before giving up
+  health_interval: 5                # seconds between each health check

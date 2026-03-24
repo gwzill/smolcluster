@@ -1,7 +1,7 @@
 host_ip:
   mini1: "10.10.0.1"
   mini2: "10.10.0.2"
-  mini3: "10.10.0.2"
+  mini3: "10.10.0.3"
   pi4: "10.10.0.1"
   macbook: "10.10.0.1"
   pi5: "192.168.50.1"
@@ -47,9 +47,11 @@ server: mini1  # Server hostname (rank 0 for SyncPS inference)
 workers:
   regular:
     - hostname: mini2
+      user: yuvrajsingh2
       rank: 1
 
     - hostname: mini3
+      user: yuvrajsingh3
       rank: 2
 
 #-------------------------------------------------------------------------

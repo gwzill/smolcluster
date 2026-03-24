@@ -22,7 +22,7 @@ def calculate_formatted_reward(predicted_answer: str) -> float:
     Returns:
         A reward value, which is 1.0 if the predicted answer is correct, and 0.0 otherwise.
     """
-    pattern = r"^<think>(.+?)</think>\s*###\s*(.+)$"
+    pattern = r"^<think>(.*?)</think>.*?<answer>\s*([-+]?\d*\.?\d+)\s*</answer>"
     match = re.match(pattern, predicted_answer.strip(), re.DOTALL)
     if not match:
         return 0.0  
