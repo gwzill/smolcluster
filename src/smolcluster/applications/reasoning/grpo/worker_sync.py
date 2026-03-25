@@ -21,10 +21,8 @@ From cluster_config_inference.yaml:
   host_ip             dict  – hostname → IP mapping, e.g. {mini1: "10.10.0.1", ...}
   workers.regular[].user str – per-worker SSH user, e.g. yuvrajsingh2
   remote_weights_filename str – filename inside remote_model_dir to overwrite, default "model.safetensors"
-  vllm_start_cmd      str   – shell command to (re)start vLLM; {model_dir}, {port}, {rank} are
-                              substituted.  Default:
-                              "nohup vllm serve {model_dir} --port {port} --trust-remote-code
-                               > /tmp/vllm_{rank}.log 2>&1 &"
+  vllm_start_cmd      str   – shell command to (re)start vLLM; {model_dir}, {port}, {rank},
+                              {vllm_activate} are substituted.  Default: tmux-based launch.
   health_retries      int   – number of health-check attempts before giving up (default 30)
   health_interval     int   – seconds between health checks (default 5)
 """
@@ -55,8 +53,10 @@ with open(_cluster_config_path) as _f:
     _cluster_cfg: Dict[str, Any] = yaml.safe_load(_f)
 
 _DEFAULT_VLLM_START_CMD = (
-    "nohup vllm serve {model_dir} --port {port} --trust-remote-code"
-    " > /tmp/vllm_{rank}.log 2>&1 &"
+    "tmux kill-session -t vllm_worker 2>/dev/null || true; "
+    "tmux new-session -d -s vllm_worker "
+    "\"bash -c 'source {vllm_activate} && vllm serve {model_dir} --port {port} "
+    "--trust-remote-code --enable-prefix-caching 2>&1 | tee /tmp/vllm_{rank}.log; exec bash'\""
 )
 
 
@@ -266,8 +266,8 @@ def _sync_single_worker(
         model_dir=remote_model_dir,
         port=port,
         rank=rank,
+        vllm_activate=vllm_activate,
     )
-    vllm_start_cmd = f"source {shlex.quote(vllm_activate)} && {vllm_start_cmd}"
 
     local_weights_file = local_weights_dir / "model.safetensors"
     remote_weights_path = f"{remote_model_dir}/{remote_weights_filename}"
@@ -289,8 +289,11 @@ def _sync_single_worker(
     _scp_file(local_weights_file, hostname, remote_weights_path)
     logger.info("[weight_sync] worker %d (%s): weights uploaded", rank, hostname)
 
-    # 4. Kill the running vLLM process on the worker.
-    kill_result = _run_ssh(hostname, "pkill -f 'vllm serve' || true")
+    # 4. Kill the running vLLM tmux session and any stale process on the worker.
+    kill_result = _run_ssh(
+        hostname,
+        "tmux kill-session -t vllm_worker 2>/dev/null || true; pkill -f 'vllm serve' 2>/dev/null || true",
+    )
     logger.info(
         "[weight_sync] worker %d (%s): pkill vllm → rc=%d stderr=%s",
         rank, hostname, kill_result.returncode, kill_result.stderr.strip() or "-",
