@@ -8,896 +8,938 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
 
     :root {
-      --bg-0: #f9f6ef;
-      --bg-1: #eef4f1;
-      --bg-2: #fff6ea;
-      --ink: #102a28;
-      --ink-soft: #31524f;
-      --accent: #d06a2f;
-      --accent-2: #177e89;
-      --green: #1a9e63;
-      --panel: rgba(255,255,255,0.84);
-      --card: rgba(255,255,255,0.96);
-      --line: rgba(16,42,40,0.1);
-      --shadow: 0 24px 60px rgba(22,41,39,0.14);
-      --radius: 16px;
+      --bg-0: #f8f5ee;
+      --bg-1: #ecf3f0;
+      --bg-2: #fff5e8;
+      --ink: #0f2926;
+      --ink-2: #2f504d;
+      --ink-3: #5a7a77;
+      --accent:   #d06a2f;
+      --teal:     #177e89;
+      --green:    #1a9e63;
+      --red:      #c0392b;
+      --panel:    rgba(255,255,255,0.82);
+      --card:     rgba(255,255,255,0.96);
+      --line:     rgba(15,41,38,0.09);
+      --line2:    rgba(15,41,38,0.05);
+      --r:        14px;
     }
 
     body {
       font-family: 'Space Grotesk', sans-serif;
       background:
-        radial-gradient(1200px 600px at 10% 10%, rgba(23,126,137,0.12), transparent 60%),
-        radial-gradient(900px 500px at 90% 0%, rgba(208,106,47,0.15), transparent 55%),
-        linear-gradient(150deg, var(--bg-0), var(--bg-1) 50%, var(--bg-2));
+        radial-gradient(ellipse 1400px 600px at 8% 5%, rgba(23,126,137,0.11) 0%, transparent 55%),
+        radial-gradient(ellipse 900px 500px at 92% 2%, rgba(208,106,47,0.13) 0%, transparent 55%),
+        linear-gradient(155deg, var(--bg-0) 0%, var(--bg-1) 50%, var(--bg-2) 100%);
       min-height: 100vh;
+      color: var(--ink);
       display: flex;
       flex-direction: column;
-      color: var(--ink);
     }
 
-    /* ── Header ─────────────────────────────────────────────────────────── */
+    /* ═══ Header ═══════════════════════════════════════════════════════════ */
     header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 14px 28px;
-      background: var(--panel);
-      backdrop-filter: blur(12px);
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 13px 28px;
+      background: var(--panel); backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--line);
-      position: sticky; top: 0; z-index: 10;
     }
+    .logo { font-size: 19px; font-weight: 700; letter-spacing: -.5px; }
+    .logo em { color: var(--teal); font-style: normal; }
+    .hstats { display: flex; gap: 22px; font-size: 12px; color: var(--ink-2); }
+    .hstat { display: flex; align-items: center; gap: 6px; }
+    .pip { width: 7px; height: 7px; border-radius: 50%; background: #ccc; }
+    .pip.on  { background: var(--green);  box-shadow: 0 0 7px var(--green); }
+    .pip.hot { background: var(--accent); box-shadow: 0 0 7px var(--accent); }
 
-    .logo { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
-    .logo span { color: var(--accent-2); }
-
-    .header-stats { display: flex; gap: 20px; font-size: 13px; color: var(--ink-soft); }
-    .stat { display: flex; align-items: center; gap: 6px; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; }
-    .dot.green  { background: var(--green); box-shadow: 0 0 6px var(--green); }
-    .dot.orange { background: var(--accent); }
-
-    /* ── Main layout ─────────────────────────────────────────────────────── */
+    /* ═══ Layout ════════════════════════════════════════════════════════════ */
     main {
-      display: grid;
-      grid-template-columns: 320px 1fr;
-      gap: 0;
-      flex: 1;
-      height: calc(100vh - 53px);
+      flex: 1; display: grid;
+      grid-template-columns: 310px 1fr;
+      height: calc(100vh - 52px);
       overflow: hidden;
     }
 
-    /* ── Left panel ──────────────────────────────────────────────────────── */
-    .panel-left {
+    /* ═══ Left panel ════════════════════════════════════════════════════════ */
+    .left {
       border-right: 1px solid var(--line);
       overflow-y: auto;
-      padding: 18px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      background: rgba(255,255,255,0.3);
+      padding: 16px 13px;
+      display: flex; flex-direction: column; gap: 9px;
+      background: rgba(255,255,255,0.28);
+    }
+    .ptitle {
+      font-size: 9.5px; font-weight: 700; letter-spacing: 1.3px;
+      text-transform: uppercase; color: var(--ink-3);
+      padding: 0 3px 7px; border-bottom: 1px solid var(--line);
     }
 
-    .panel-title {
-      font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
-      text-transform: uppercase; color: var(--ink-soft);
-      padding: 0 4px 6px; border-bottom: 1px solid var(--line);
-    }
-
-    .node-card {
+    /* Node cards */
+    .ncard {
       background: var(--card); border: 1px solid var(--line);
-      border-radius: 14px; padding: 13px 14px;
+      border-radius: var(--r); padding: 12px 13px;
       display: flex; flex-direction: column; gap: 7px;
-      animation: slideIn 220ms ease-out;
-      box-shadow: 0 2px 10px rgba(16,42,40,0.05);
-      transition: box-shadow 0.2s;
+      animation: rise 220ms ease-out;
+      box-shadow: 0 1px 8px rgba(15,41,38,0.05);
+      transition: box-shadow .18s, border-color .18s;
     }
-    .node-card:hover { box-shadow: 0 4px 18px rgba(16,42,40,0.1); }
+    .ncard:hover { box-shadow: 0 4px 18px rgba(15,41,38,0.1); }
+    .ncard.in-cluster { border-color: rgba(23,126,137,0.35); }
+    .ncard.running    { border-color: rgba(26,158,99,0.45); }
 
-    @keyframes slideIn {
-      from { opacity: 0; transform: translateY(6px); }
-      to   { opacity: 1; transform: translateY(0); }
+    @keyframes rise { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:none; } }
+
+    .nhead { display: flex; align-items: center; gap: 9px; }
+    .nicon { font-size: 22px; line-height: 1; }
+    .nname { font-size: 13px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
+    .nmeta { font-size: 10.5px; color: var(--ink-3); }
+
+    .nbadge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10px; font-weight: 600;
+      padding: 2px 8px; border-radius: 5px;
     }
+    .nbadge.avail   { background: rgba(23,126,137,0.09); color: var(--teal); }
+    .nbadge.cluster { background: rgba(208,106,47,0.11); color: var(--accent); }
+    .nbadge.active  { background: rgba(26,158,99,0.12);  color: var(--green); }
 
-    .node-header { display: flex; align-items: center; gap: 9px; }
-    .node-icon { font-size: 24px; line-height: 1; }
-    .node-name { font-size: 14px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
-    .node-meta { font-size: 11px; color: var(--ink-soft); }
-
-    .badge {
-      background: rgba(23,126,137,0.1); color: var(--accent-2);
-      border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 500;
-    }
-    .badge.active { background: rgba(26,158,99,0.12); color: var(--green); }
-    .badge.pending { background: rgba(208,106,47,0.12); color: var(--accent); }
-
-    .connect-btn {
-      align-self: flex-start; padding: 6px 16px; border-radius: 8px;
-      border: 1.5px solid var(--accent-2); background: transparent;
-      color: var(--accent-2); font-family: 'Space Grotesk', sans-serif;
-      font-size: 12px; font-weight: 600; cursor: pointer;
-      transition: background 0.15s, color 0.15s;
-    }
-    .connect-btn:hover { background: var(--accent-2); color: #fff; }
-    .connect-btn.disconnect { border-color: #c0392b; color: #c0392b; }
-    .connect-btn.disconnect:hover { background: #c0392b; color: #fff; }
-    .connect-btn:disabled { opacity: 0.45; cursor: default; }
-
-    .ssh-row { display: flex; align-items: center; gap: 7px; }
+    .sshr { display: flex; align-items: center; gap: 7px; }
+    .sshlbl { font-size: 10px; color: var(--ink-3); }
     input[type="text"] {
-      padding: 5px 9px; border-radius: 7px; border: 1.5px solid var(--line);
+      padding: 4px 9px; border-radius: 7px; border: 1.5px solid var(--line);
       background: var(--bg-0); font-family: 'IBM Plex Mono', monospace;
-      font-size: 11px; color: var(--ink); width: 112px;
+      font-size: 11px; color: var(--ink); width: 110px;
+      transition: border-color .15s;
     }
-    .ssh-label { font-size: 10px; color: var(--ink-soft); }
+    input[type="text"]:focus { outline: none; border-color: var(--teal); }
 
-    .empty-state {
-      text-align: center; color: var(--ink-soft); font-size: 13px;
-      padding: 28px 16px; opacity: 0.7;
+    .nbtn {
+      align-self: flex-start; padding: 5px 14px; border-radius: 7px;
+      border: 1.5px solid var(--teal); background: transparent;
+      color: var(--teal); font-family: 'Space Grotesk', sans-serif;
+      font-size: 11.5px; font-weight: 700; cursor: pointer;
+      transition: background .14s, color .14s;
     }
-    .empty-state .big { font-size: 30px; margin-bottom: 6px; }
+    .nbtn:hover { background: var(--teal); color: #fff; }
+    .nbtn.rm  { border-color: var(--red); color: var(--red); }
+    .nbtn.rm:hover { background: var(--red); color: #fff; }
+    .nbtn:disabled { opacity: .4; cursor: default; }
 
-    /* ── Right panel ─────────────────────────────────────────────────────── */
-    .panel-right {
-      display: flex; flex-direction: column; overflow: hidden;
+    .empty {
+      text-align: center; color: var(--ink-3);
+      font-size: 12.5px; padding: 28px 12px; opacity: .75;
+    }
+    .empty .eico { font-size: 28px; margin-bottom: 7px; }
+
+    /* ═══ Right panel ════════════════════════════════════════════════════════ */
+    .right {
+      display: flex; flex-direction: column;
+      overflow: hidden;
     }
 
-    /* ── Topology canvas section ─────────────────────────────────────────── */
-    .topo-section {
+    /* ── Topology canvas ─────────────────────────────────────────────────── */
+    .topo-wrap {
       flex: 1; min-height: 0; position: relative;
-      background: rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.18);
       border-bottom: 1px solid var(--line);
     }
+    #topo { display: block; width: 100%; height: 100%; }
 
-    #topo {
-      display: block; width: 100%; height: 100%;
+    .topo-tag {
+      position: absolute; top: 13px; left: 16px;
+      font-size: 9.5px; font-weight: 700; letter-spacing: 1.2px;
+      text-transform: uppercase; color: var(--ink-3); pointer-events: none;
     }
-
     .topo-legend {
-      position: absolute; bottom: 12px; right: 16px;
-      display: flex; gap: 14px; font-size: 10px; color: var(--ink-soft);
-      pointer-events: none;
+      position: absolute; bottom: 10px; right: 14px;
+      display: flex; gap: 14px; pointer-events: none;
     }
-    .legend-item { display: flex; align-items: center; gap: 5px; }
-    .legend-dot {
-      width: 7px; height: 7px; border-radius: 50%;
-    }
+    .leg { display: flex; align-items: center; gap: 5px;
+           font-size: 9.5px; color: var(--ink-3); }
+    .legdot { width: 7px; height: 7px; border-radius: 50%; }
 
-    .topo-algo-label {
-      position: absolute; top: 12px; left: 16px;
-      font-size: 10px; font-weight: 600; letter-spacing: 1px;
-      text-transform: uppercase; color: var(--ink-soft);
-      pointer-events: none;
-    }
-
-    /* ── Inference status bar ────────────────────────────────────────────── */
-    #infer-bar {
+    /* ── Status bar (connectivity / inference) ────────────────────────────── */
+    #status-bar {
       display: none;
-      padding: 8px 20px; background: rgba(23,126,137,0.08);
-      border-bottom: 1px solid rgba(23,126,137,0.2);
-      font-size: 12px; color: var(--accent-2);
-      display: flex; align-items: center; gap: 10px;
+      align-items: center; gap: 10px;
+      padding: 7px 20px;
+      font-size: 11.5px; color: var(--teal);
+      background: rgba(23,126,137,0.07);
+      border-bottom: 1px solid rgba(23,126,137,0.18);
     }
-    #infer-bar.hidden { display: none !important; }
-    .infer-spinner {
-      width: 14px; height: 14px; border: 2px solid rgba(23,126,137,0.3);
-      border-top-color: var(--accent-2); border-radius: 50%;
-      animation: spin 0.7s linear infinite; flex-shrink: 0;
+    #status-bar.show { display: flex; }
+    .spin {
+      width: 13px; height: 13px; flex-shrink: 0;
+      border: 2px solid rgba(23,126,137,0.25);
+      border-top-color: var(--teal); border-radius: 50%;
+      animation: spin .65s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Bottom section ──────────────────────────────────────────────────── */
-    .bottom-section {
-      flex-shrink: 0; padding: 16px 22px; display: flex; flex-direction: column; gap: 14px;
-      overflow-y: auto; max-height: 46vh;
-      background: rgba(255,255,255,0.4);
+    /* Connectivity node chips */
+    #conn-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .cchip {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 20px;
+      font-size: 10.5px; font-family: 'IBM Plex Mono', monospace;
+      font-weight: 500; transition: background .2s;
+    }
+    .cchip.wait { background: rgba(23,126,137,0.1); color: var(--teal); }
+    .cchip.ok   { background: rgba(26,158,99,0.12); color: var(--green); }
+    .cchip.fail { background: rgba(192,57,43,0.1);  color: var(--red); }
+    .cchip .cdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    /* ── Bottom: controls + log ───────────────────────────────────────────── */
+    .bottom {
+      flex-shrink: 0;
+      display: flex; flex-direction: column;
+      max-height: 42vh; overflow: hidden;
+      background: rgba(255,255,255,0.35);
     }
 
-    .section-title {
-      font-size: 10px; font-weight: 600; letter-spacing: 1px;
-      text-transform: uppercase; color: var(--ink-soft);
-      margin-bottom: 8px;
+    /* Controls bar */
+    .ctrl-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
     }
-
-    /* ── Controls ────────────────────────────────────────────────────────── */
-    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
     select {
-      padding: 8px 12px; border-radius: 9px; border: 1.5px solid var(--line);
+      padding: 7px 11px; border-radius: 9px; border: 1.5px solid var(--line);
       background: var(--card); font-family: 'Space Grotesk', sans-serif;
-      font-size: 13px; color: var(--ink); cursor: pointer; appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2331524f' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat; background-position: right 11px center; padding-right: 30px;
+      font-size: 12.5px; color: var(--ink); cursor: pointer; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7'%3E%3Cpath d='M1 1l4.5 4.5L10 1' stroke='%232f504d' stroke-width='1.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px;
     }
 
-    .action-btn {
-      padding: 8px 18px; border-radius: 9px; border: none;
-      font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 600;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s;
+    .abtn {
+      padding: 7px 16px; border-radius: 9px; border: none;
+      font-family: 'Space Grotesk', sans-serif; font-size: 12.5px; font-weight: 700;
+      cursor: pointer; transition: opacity .14s, transform .1s;
+      display: flex; align-items: center; gap: 6px;
     }
-    .action-btn:hover { opacity: 0.88; transform: translateY(-1px); }
-    .action-btn:active { transform: translateY(0); }
-    .action-btn:disabled { opacity: 0.38; cursor: default; transform: none; }
+    .abtn:hover:not(:disabled) { opacity: .86; transform: translateY(-1px); }
+    .abtn:active:not(:disabled) { transform: none; }
+    .abtn:disabled { opacity: .36; cursor: default; }
+    .abtn.train { background: var(--green); color: #fff; }
+    .abtn.infer { background: var(--teal);  color: #fff; }
+    .abtn.conn  { background: transparent; color: var(--ink-2);
+                  border: 1.5px solid var(--line); }
+    .abtn.stop  { background: var(--red);   color: #fff; }
 
-    .btn-train { background: var(--green); color: #fff; }
-    .btn-infer { background: var(--accent-2); color: #fff; }
-    .btn-stop  { background: #c0392b; color: #fff; }
+    /* Training metrics strip */
+    #metrics-strip {
+      display: none;
+      padding: 8px 20px; gap: 16px; flex-wrap: wrap;
+      align-items: center; border-bottom: 1px solid var(--line); flex-shrink: 0;
+    }
+    #metrics-strip.show { display: flex; }
+    .mstat { display: flex; flex-direction: column; gap: 1px; }
+    .mslbl { font-size: 9px; font-weight: 700; letter-spacing: .9px;
+             text-transform: uppercase; color: var(--ink-3); }
+    .msval { font-size: 17px; font-weight: 700;
+             font-family: 'IBM Plex Mono', monospace; color: var(--ink); line-height: 1; }
+    .mssub { font-size: 9.5px; color: var(--ink-3); }
 
-    /* ── Metrics ─────────────────────────────────────────────────────────── */
-    .metrics-grid {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px;
-    }
-    .metric-card {
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 11px; padding: 12px 14px;
-      display: flex; flex-direction: column; gap: 3px;
-    }
-    .metric-label {
-      font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
-      text-transform: uppercase; color: var(--ink-soft);
-    }
-    .metric-value {
-      font-size: 24px; font-weight: 700;
-      font-family: 'IBM Plex Mono', monospace; color: var(--ink); line-height: 1.1;
-    }
-    .metric-sub { font-size: 11px; color: var(--ink-soft); }
-
-    .progress-wrap {
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 11px; padding: 13px 16px;
-    }
-    .progress-header {
-      display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px;
-    }
-    .progress-bar-bg {
-      background: rgba(16,42,40,0.08); border-radius: 999px; height: 7px; overflow: hidden;
-    }
-    .progress-bar-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--accent-2), var(--accent));
-      border-radius: 999px; transition: width 0.4s ease;
+    .prog-bar-wrap { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 4px; }
+    .prog-labels { display: flex; justify-content: space-between; font-size: 10.5px; }
+    .prog-bg { background: var(--line2); border-radius: 99px; height: 6px; overflow: hidden; }
+    .prog-fill {
+      height: 100%; border-radius: 99px;
+      background: linear-gradient(90deg, var(--teal), var(--accent));
+      transition: width .4s ease;
     }
 
-    /* ── Scrollbar ───────────────────────────────────────────────────────── */
-    ::-webkit-scrollbar { width: 4px; }
+    /* ── Log terminal ─────────────────────────────────────────────────────── */
+    .log-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 18px; flex-shrink: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .log-title { font-size: 9.5px; font-weight: 700; letter-spacing: 1px;
+                 text-transform: uppercase; color: var(--ink-3); }
+    .log-actions { display: flex; gap: 8px; }
+    .log-btn {
+      font-size: 10px; font-weight: 600; padding: 2px 9px;
+      border-radius: 5px; border: 1px solid var(--line);
+      background: transparent; color: var(--ink-2); cursor: pointer;
+    }
+    .log-btn:hover { background: var(--line); }
+
+    #logbox {
+      flex: 1; overflow-y: auto;
+      background: #0e1e1c;
+      font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+      line-height: 1.55; padding: 8px 0;
+    }
+    .logline {
+      display: flex; gap: 0; padding: 0.5px 14px;
+      transition: background .1s;
+    }
+    .logline:hover { background: rgba(255,255,255,0.04); }
+    .loghostname {
+      flex-shrink: 0; width: 110px;
+      font-weight: 500; opacity: .75;
+      padding-right: 10px; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .logtext { color: rgba(255,255,255,0.82); white-space: pre-wrap; word-break: break-all; }
+
+    /* Per-host colors */
+    .hc0 { color: #63d8e0; }   /* teal */
+    .hc1 { color: #f0a060; }   /* orange */
+    .hc2 { color: #6ecf94; }   /* green */
+    .hc3 { color: #c8a4f8; }   /* purple */
+    .hc4 { color: #f0c060; }   /* yellow */
+    .hc5 { color: #f08080; }   /* red */
+    .hc6 { color: #80c0f0; }   /* blue */
+    .hc7 { color: #e0e0a0; }   /* olive */
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(16,42,40,0.12); border-radius: 99px; }
+    ::-webkit-scrollbar-thumb { background: rgba(15,41,38,.14); border-radius: 99px; }
+    #logbox::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); }
   </style>
 </head>
 <body>
 
-<!-- ── Header ───────────────────────────────────────────────────────────────── -->
 <header>
-  <div class="logo">smol<span>cluster</span></div>
-  <div class="header-stats">
-    <div class="stat">
-      <div class="dot green"></div>
-      <span id="lbl-discovered">0 discovered</span>
-    </div>
-    <div class="stat">
-      <div class="dot orange"></div>
-      <span id="lbl-connected">0 in cluster</span>
-    </div>
+  <div class="logo">smol<em>cluster</em></div>
+  <div class="hstats">
+    <div class="hstat"><div class="pip on" id="pip-disc"></div><span id="lbl-disc">0 discovered</span></div>
+    <div class="hstat"><div class="pip hot" id="pip-clus"></div><span id="lbl-clus">0 in cluster</span></div>
   </div>
 </header>
 
-<!-- ── Main ─────────────────────────────────────────────────────────────────── -->
 <main>
-
-  <!-- Left: discovered nodes -->
-  <div class="panel-left">
-    <div class="panel-title">Discovered Nodes</div>
-    <div id="discovered-list">
-      <div class="empty-state">
-        <div class="big">&#x1F4E1;</div>
-        Scanning network&hellip;
-      </div>
+  <!-- ═══ Left ═══════════════════════════════════════════════════════════════ -->
+  <div class="left">
+    <div class="ptitle">Discovered Nodes</div>
+    <div id="disc-list">
+      <div class="empty"><div class="eico">📡</div>Scanning network…</div>
     </div>
   </div>
 
-  <!-- Right: topology + controls + metrics -->
-  <div class="panel-right">
+  <!-- ═══ Right ══════════════════════════════════════════════════════════════ -->
+  <div class="right">
 
     <!-- Topology canvas -->
-    <div class="topo-section">
+    <div class="topo-wrap">
       <canvas id="topo"></canvas>
-      <div class="topo-algo-label" id="topo-algo-label"></div>
+      <div class="topo-tag" id="topo-tag"></div>
       <div class="topo-legend" id="topo-legend" style="display:none">
-        <div class="legend-item">
-          <div class="legend-dot" style="background:var(--green)"></div>
-          gradients ↑
-        </div>
-        <div class="legend-item">
-          <div class="legend-dot" style="background:var(--accent)"></div>
-          weights ↓
-        </div>
+        <div class="leg"><div class="legdot" style="background:var(--green)"></div>gradients ↑</div>
+        <div class="leg"><div class="legdot" style="background:var(--accent)"></div>weights ↓</div>
       </div>
     </div>
 
-    <!-- Inference status bar -->
-    <div id="infer-bar" class="hidden">
-      <div class="infer-spinner" id="infer-spinner"></div>
-      <span id="infer-msg">Checking connectivity…</span>
+    <!-- Status bar: connectivity results -->
+    <div id="status-bar">
+      <div class="spin" id="status-spin"></div>
+      <span id="status-msg"></span>
+      <div id="conn-chips"></div>
     </div>
 
-    <!-- Bottom: controls + metrics -->
-    <div class="bottom-section">
+    <!-- Bottom controls + log -->
+    <div class="bottom">
 
       <!-- Controls -->
-      <div>
-        <div class="section-title">Cluster Controls</div>
-        <div class="controls">
-          <select id="algo-select">
-            <option value="syncps">SyncPS — Sync Parameter Server</option>
-            <option value="edp">EDP — Elastic Data Parallelism</option>
-            <option value="mp">MP — Model Parallelism</option>
-            <option value="mp_pipeline">MP Pipeline</option>
-            <option value="classicdp">Classic Data Parallelism</option>
-            <option value="fsdp">FSDP — Fully Sharded</option>
-            <option value="ep">EP — Expert Parallelism</option>
-          </select>
-          <button class="action-btn btn-train" id="btn-train" onclick="startTraining()">
-            &#9654; Train
-          </button>
-          <button class="action-btn btn-infer" id="btn-infer" onclick="startInference()">
-            &#128268; Test Connectivity
-          </button>
-          <button class="action-btn btn-stop" id="btn-stop" onclick="stopAll()" disabled>
-            &#9632; Stop
-          </button>
-        </div>
+      <div class="ctrl-bar">
+        <select id="algo-sel">
+          <option value="syncps">SyncPS — Sync Parameter Server</option>
+          <option value="edp">EDP — Elastic Data Parallelism</option>
+          <option value="mp">MP — Model Parallelism</option>
+          <option value="mp_pipeline">MP Pipeline</option>
+          <option value="classicdp">Classic Data Parallelism</option>
+          <option value="fsdp">FSDP — Fully Sharded</option>
+          <option value="ep">EP — Expert Parallelism</option>
+        </select>
+        <button class="abtn train" id="btn-train" onclick="startTraining()">
+          <svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor"/></svg>
+          Train
+        </button>
+        <button class="abtn infer" id="btn-infer" onclick="startInference()">
+          <svg width="11" height="11" viewBox="0 0 11 11"><circle cx="5.5" cy="5.5" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><line x1="5.5" y1="2" x2="5.5" y2="5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="5.5" cy="7.5" r=".8" fill="currentColor"/></svg>
+          Inference
+        </button>
+        <button class="abtn conn" id="btn-conn" onclick="checkConn()">
+          <svg width="11" height="11" viewBox="0 0 11 11"><path d="M2 9 Q5.5 2 9 9" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
+          Ping Nodes
+        </button>
+        <button class="abtn stop" id="btn-stop" onclick="stopAll()" disabled>
+          <svg width="9" height="9" viewBox="0 0 9 9"><rect width="9" height="9" fill="currentColor" rx="1.5"/></svg>
+          Stop
+        </button>
       </div>
 
-      <!-- Progress bar (training only) -->
-      <div id="progress-section" style="display:none">
-        <div class="progress-wrap">
-          <div class="progress-header">
-            <span id="prog-label">Step 0</span>
+      <!-- Training metrics strip -->
+      <div id="metrics-strip">
+        <div class="mstat">
+          <div class="mslbl">Loss</div>
+          <div class="msval" id="m-loss">—</div>
+        </div>
+        <div class="mstat">
+          <div class="mslbl">Throughput</div>
+          <div class="msval" id="m-tput">—</div>
+          <div class="mssub">tok/s</div>
+        </div>
+        <div class="mstat">
+          <div class="mslbl">Step</div>
+          <div class="msval" id="m-step">—</div>
+          <div class="mssub" id="m-step-sub"></div>
+        </div>
+        <div class="mstat">
+          <div class="mslbl">Algo</div>
+          <div class="msval" id="m-algo" style="font-size:13px">—</div>
+        </div>
+        <div class="prog-bar-wrap" id="prog-wrap" style="display:none">
+          <div class="prog-labels">
+            <span id="prog-lbl">Step 0</span>
             <span id="prog-pct">0%</span>
           </div>
-          <div class="progress-bar-bg">
-            <div class="progress-bar-fill" id="prog-bar" style="width:0%"></div>
-          </div>
+          <div class="prog-bg"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
         </div>
       </div>
 
-      <!-- Training metrics -->
-      <div id="metrics-section" style="display:none">
-        <div class="section-title">Live Metrics</div>
-        <div class="metrics-grid">
-          <div class="metric-card">
-            <div class="metric-label">Loss</div>
-            <div class="metric-value" id="m-loss">—</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">Throughput</div>
-            <div class="metric-value" id="m-tput">—</div>
-            <div class="metric-sub">tokens / sec</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">Step</div>
-            <div class="metric-value" id="m-step">—</div>
-            <div class="metric-sub" id="m-step-sub"></div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">Algorithm</div>
-            <div class="metric-value" id="m-algo" style="font-size:15px">—</div>
-          </div>
+      <!-- Log terminal -->
+      <div class="log-header">
+        <div class="log-title">Live Logs</div>
+        <div class="log-actions">
+          <button class="log-btn" id="autoscroll-btn" onclick="toggleAutoscroll()">autoscroll ✓</button>
+          <button class="log-btn" onclick="clearLogs()">clear</button>
         </div>
       </div>
+      <div id="logbox"></div>
 
     </div>
   </div>
 </main>
 
 <script>
-// ── State ──────────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// State
+// ════════════════════════════════════════════════════════════════════════════
 let state = {
-  discovered: {}, selected: {}, running: {}, usernames: {},
-  training: {}, inference: {}
+  discovered:{}, selected:{}, running:{}, usernames:{}, ssh_aliases:{}, training:{}, connectivity:{}
 };
 const sshOverrides = {};
-let _prevNodesSig = '', _prevTrainSig = '', _prevInferSig = '';
+let _prevNSig='', _prevTSig='', _prevCSig='';
 
-// ── SSE ────────────────────────────────────────────────────────────────────────
+// Log terminal
+let autoscroll = true;
+const hostColorMap = {};
+let nextColor = 0;
+const HOST_COLORS = ['hc0','hc1','hc2','hc3','hc4','hc5','hc6','hc7'];
+
+function hostColor(hostname) {
+  if (!hostColorMap[hostname]) hostColorMap[hostname] = HOST_COLORS[nextColor++ % HOST_COLORS.length];
+  return hostColorMap[hostname];
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SSE — state stream
+// ════════════════════════════════════════════════════════════════════════════
 function startSSE() {
   const es = new EventSource('/api/events');
-  es.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    state.discovered = data.nodes.discovered || {};
-    state.selected   = data.nodes.selected   || {};
-    state.running    = data.nodes.running    || {};
-    state.usernames  = data.nodes.usernames  || {};
-    state.training   = data.training         || {};
-    state.inference  = data.inference        || {};
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    state.discovered    = d.nodes.discovered    || {};
+    state.selected      = d.nodes.selected      || {};
+    state.running       = d.nodes.running       || {};
+    state.usernames     = d.nodes.usernames     || {};
+    state.ssh_aliases   = d.nodes.ssh_aliases   || {};
+    state.training      = d.training            || {};
+    state.connectivity  = d.connectivity        || {};
 
-    const nodesSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames]);
-    const trainSig = JSON.stringify(state.training);
-    const inferSig = JSON.stringify(state.inference);
+    const nSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames]);
+    const tSig = JSON.stringify(state.training);
+    const cSig = JSON.stringify(state.connectivity);
 
-    if (nodesSig !== _prevNodesSig) {
-      renderHeader(); renderDiscovered(); updateButtons();
-      _prevNodesSig = nodesSig;
-    }
-    if (trainSig !== _prevTrainSig) {
-      renderTraining(); updateButtons();
-      _prevTrainSig = trainSig;
-    }
-    if (inferSig !== _prevInferSig) {
-      renderInference();
-      _prevInferSig = inferSig;
-    }
+    if (nSig !== _prevNSig) { renderHeader(); renderLeft(); updateButtons(); _prevNSig = nSig; }
+    if (tSig !== _prevTSig) { renderMetrics(); updateButtons(); _prevTSig = tSig; }
+    if (cSig !== _prevCSig) { renderConnBar(); _prevCSig = cSig; }
   };
   es.onerror = () => { es.close(); setTimeout(startSSE, 3000); };
 }
 
-// ── Header ─────────────────────────────────────────────────────────────────────
-function renderHeader() {
-  setText('lbl-discovered', `${Object.keys(state.discovered).length} discovered`);
-  const nSel = Object.keys(state.selected).length + Object.keys(state.running).length;
-  setText('lbl-connected', `${nSel} in cluster`);
+// SSE — log stream
+function startLogs() {
+  const es = new EventSource('/api/logs');
+  es.onmessage = e => {
+    const lines = JSON.parse(e.data);
+    lines.forEach(appendLog);
+  };
+  es.onerror = () => { es.close(); setTimeout(startLogs, 3000); };
 }
 
-// ── Discovered panel (diff, no flicker) ────────────────────────────────────────
-function renderDiscovered() {
-  const list  = document.getElementById('discovered-list');
+// ════════════════════════════════════════════════════════════════════════════
+// Render helpers
+// ════════════════════════════════════════════════════════════════════════════
+function renderHeader() {
+  setText('lbl-disc', `${Object.keys(state.discovered).length} discovered`);
+  const n = Object.keys(state.selected).length + Object.keys(state.running).length;
+  setText('lbl-clus', `${n} in cluster`);
+}
+
+function updateButtons() {
+  const running = Object.keys(state.running).length > 0;
+  const hasSel  = Object.keys(state.selected).length > 0;
+  $('btn-train').disabled = running || !hasSel;
+  $('btn-infer').disabled = running || !hasSel;
+  $('btn-conn').disabled  = !hasSel && !running;
+  $('btn-stop').disabled  = !running;
+}
+
+// ── Left panel ───────────────────────────────────────────────────────────────
+function renderLeft() {
+  const list  = $('disc-list');
   const nodes = state.discovered;
   const keys  = Object.keys(nodes);
 
-  if (keys.length === 0) {
-    if (!list.querySelector('.empty-state'))
-      list.innerHTML = '<div class="empty-state"><div class="big">&#x1F4E1;</div>Scanning…</div>';
+  if (!keys.length) {
+    if (!list.querySelector('.empty'))
+      list.innerHTML = '<div class="empty"><div class="eico">📡</div>Scanning…</div>';
     return;
   }
-  list.querySelector('.empty-state')?.remove();
+  list.querySelector('.empty')?.remove();
+  list.querySelectorAll('.ncard[data-h]').forEach(c => { if (!nodes[c.dataset.h]) c.remove(); });
 
-  list.querySelectorAll('.node-card[data-hostname]').forEach(card => {
-    if (!nodes[card.dataset.hostname]) card.remove();
-  });
-
-  keys.forEach(hostname => {
-    let card = list.querySelector(`.node-card[data-hostname="${CSS.escape(hostname)}"]`);
-    if (!card) { card = buildCard(hostname, nodes[hostname]); list.appendChild(card); }
-    syncCard(card, hostname, nodes[hostname]);
+  keys.forEach(h => {
+    let c = list.querySelector(`.ncard[data-h="${CSS.escape(h)}"]`);
+    if (!c) { c = buildCard(h, nodes[h]); list.appendChild(c); }
+    syncCard(c, h, nodes[h]);
   });
 }
 
-function buildCard(hostname, n) {
-  const card = document.createElement('div');
-  card.className = 'node-card';
-  card.dataset.hostname = hostname;
-  card.innerHTML = `
-    <div class="node-header">
-      <div class="node-icon">${nodeIcon(n)}</div>
+function buildCard(h, n) {
+  const c = document.createElement('div');
+  c.className = 'ncard'; c.dataset.h = h;
+  c.innerHTML = `
+    <div class="nhead">
+      <div class="nicon">${nodeIcon(n)}</div>
       <div>
-        <div class="node-name">${hostname}.local</div>
-        <div class="node-meta node-os">${[n.os, n.os_version, n.machine].filter(Boolean).join(' · ') || 'macOS'}</div>
+        <div class="nname">${h}.local</div>
+        <div class="nmeta">${[n.os,n.os_version,n.machine].filter(Boolean).join(' · ') || 'macOS'}</div>
       </div>
     </div>
-    <div class="card-badges"></div>
-    <div class="ssh-row">
-      <span class="ssh-label">SSH user:</span>
-      <input type="text" class="ssh-input" placeholder="detecting…">
+    <div class="badges"></div>
+    <div class="sshr">
+      <span class="sshlbl">SSH target:</span>
+      <input type="text" class="sshinput" placeholder="detecting…">
     </div>
-    <button class="connect-btn card-btn">Add to Cluster</button>
+    <button class="nbtn ncbtn">Add to Cluster</button>
   `;
-  card.querySelector('.ssh-input').addEventListener('input', function() {
-    sshOverrides[hostname] = this.value.trim();
+  c.querySelector('.sshinput').addEventListener('input', function() {
+    sshOverrides[h] = this.value.trim();
   });
-  card.querySelector('.card-btn').addEventListener('click', () => {
-    if (hostname in state.selected || hostname in state.running)
-      removeFromCluster(hostname);
-    else
-      addToCluster(hostname, card);
+  c.querySelector('.ncbtn').addEventListener('click', () => {
+    (h in state.selected || h in state.running) ? removeNode(h) : addNode(h, c);
   });
-  return card;
+  return c;
 }
 
-function syncCard(card, hostname, n) {
-  const isSelected = hostname in state.selected;
-  const isRunning  = hostname in state.running;
+function syncCard(c, h, n) {
+  const isSel = h in state.selected;
+  const isRun = h in state.running;
 
-  // Fill username once
-  const input  = card.querySelector('.ssh-input');
-  const probed = state.usernames[hostname];
-  if (probed && !sshOverrides[hostname] && input.value !== probed) {
-    input.value = probed; input.placeholder = probed;
-  } else if (probed === null || probed === undefined) {
-    input.placeholder = 'detecting…';
-  } else if (probed === '') {
-    input.placeholder = getGuessUser(hostname) || 'username';
+  c.className = `ncard${isRun ? ' running' : isSel ? ' in-cluster' : ''}`;
+
+  const inp   = c.querySelector('.sshinput');
+  // Priority: SSH config alias > probed username > pattern guess
+  const alias  = state.ssh_aliases[h];
+  const probed = state.usernames[h];
+  const fill   = alias || probed || '';
+  if (fill && !sshOverrides[h] && inp.value !== fill) {
+    inp.value = fill; inp.placeholder = fill;
+  } else if (!fill && !sshOverrides[h]) {
+    inp.placeholder = guessUser(h) || (probed === null ? 'detecting…' : 'user or alias');
   }
 
-  // Badge
-  const badges = card.querySelector('.card-badges');
-  if (isRunning) {
-    const algo = state.running[hostname]?.algorithm || '';
-    const label = algo === 'infer' ? '⚡ testing' : '● training';
-    badges.innerHTML = `<span class="badge active">${label}</span>`;
-  } else if (isSelected) {
-    badges.innerHTML = `<span class="badge pending">✓ in cluster</span>`;
+  const badges = c.querySelector('.badges');
+  if (isRun) {
+    const algo = state.running[h]?.algorithm || '';
+    badges.innerHTML = `<span class="nbadge active">● ${algo === 'infer' ? 'inferring' : 'training'}</span>`;
+  } else if (isSel) {
+    badges.innerHTML = `<span class="nbadge cluster">✓ in cluster</span>`;
   } else {
-    badges.innerHTML = `<span class="badge">available</span>`;
+    badges.innerHTML = `<span class="nbadge avail">available</span>`;
   }
 
-  // Button
-  const btn = card.querySelector('.card-btn');
+  const btn = c.querySelector('.ncbtn');
   if (!btn.disabled) {
-    const inCluster = isSelected || isRunning;
-    btn.textContent = inCluster ? 'Remove' : 'Add to Cluster';
-    btn.className = `connect-btn${inCluster ? ' disconnect' : ''} card-btn`;
+    const inC = isSel || isRun;
+    btn.textContent = inC ? 'Remove' : 'Add to Cluster';
+    btn.className   = `nbtn${inC ? ' rm' : ''} ncbtn`;
   }
 }
 
-// ── Inference status bar ────────────────────────────────────────────────────────
-function renderInference() {
-  const bar = document.getElementById('infer-bar');
-  const inf = state.inference;
+// ── Status bar (connectivity / inference) ────────────────────────────────────
+function renderConnBar() {
+  const bar  = $('status-bar');
+  const c    = state.connectivity;
+  if (!c || !c.mode) { bar.classList.remove('show'); return; }
 
-  const inferRunning = Object.values(state.running).some(r => r.algorithm === 'infer');
+  bar.classList.add('show');
+  setText('status-msg', c.message || '');
+  $('status-spin').style.display = c.status === 'done' || c.status === 'ready' ? 'none' : '';
 
-  if (!inferRunning || !inf || !inf.mode) {
-    bar.classList.add('hidden');
-    return;
+  if (c.mode === 'connectivity' && c.results) {
+    const allHosts = Object.keys(state.selected);
+    const chips = $('conn-chips');
+    chips.innerHTML = '';
+    allHosts.forEach(h => {
+      const r   = (c.results || []).find(x => x.hostname === h);
+      const cls = !r ? 'wait' : r.status === 'ok' ? 'ok' : 'fail';
+      const lbl = !r ? '…' : r.status === 'ok' ? `${r.ms}ms` : r.status;
+      chips.innerHTML += `<span class="cchip ${cls}"><span class="cdot"></span>${h}  ${lbl}</span>`;
+    });
+  } else {
+    $('conn-chips').innerHTML = '';
   }
-
-  bar.classList.remove('hidden');
-  setText('infer-msg', inf.message || 'Checking connectivity…');
-
-  const spinner = document.getElementById('infer-spinner');
-  const done = inf.status === 'ready' || inf.status === 'partial';
-  spinner.style.display = done ? 'none' : '';
 }
 
-// ── Training metrics ────────────────────────────────────────────────────────────
-function renderTraining() {
-  const t = state.training;
-  const has = t && (t.step !== undefined || t.loss !== undefined);
-  document.getElementById('metrics-section').style.display = has ? '' : 'none';
-  document.getElementById('progress-section').style.display = (has && t.total_steps) ? '' : 'none';
+// ── Training metrics ──────────────────────────────────────────────────────────
+function renderMetrics() {
+  const t   = state.training;
+  const has = t && (t.step != null || t.loss != null);
+  $('metrics-strip').classList.toggle('show', has);
   if (!has) return;
-
-  setText('m-loss', t.loss        != null ? Number(t.loss).toFixed(4) : '—');
-  setText('m-tput', t.throughput  != null ? Math.round(t.throughput)  : '—');
-  setText('m-step', t.step        != null ? t.step.toLocaleString()    : '—');
-  setText('m-algo', t.algorithm   || document.getElementById('algo-select').value);
+  setText('m-loss', t.loss       != null ? Number(t.loss).toFixed(4) : '—');
+  setText('m-tput', t.throughput != null ? Math.round(t.throughput)  : '—');
+  setText('m-step', t.step       != null ? t.step.toLocaleString()   : '—');
+  setText('m-algo', t.algorithm  || $('algo-sel').value);
   setText('m-step-sub', t.total_steps ? `of ${t.total_steps.toLocaleString()}` : '');
-
-  if (t.step != null && t.total_steps) {
+  const hasProg = t.step != null && t.total_steps;
+  $('prog-wrap').style.display = hasProg ? '' : 'none';
+  if (hasProg) {
     const pct = Math.min(100, Math.round(t.step / t.total_steps * 100));
-    document.getElementById('prog-bar').style.width = pct + '%';
-    setText('prog-label', `Step ${t.step.toLocaleString()} / ${t.total_steps.toLocaleString()}`);
+    $('prog-fill').style.width = pct + '%';
+    setText('prog-lbl', `Step ${t.step.toLocaleString()} / ${t.total_steps.toLocaleString()}`);
     setText('prog-pct', pct + '%');
   }
 }
 
-function updateButtons() {
-  const isRunning = Object.keys(state.running).length > 0;
-  const hasSel    = Object.keys(state.selected).length > 0;
-  document.getElementById('btn-train').disabled = isRunning || !hasSel;
-  document.getElementById('btn-infer').disabled = isRunning || !hasSel;
-  document.getElementById('btn-stop').disabled  = !isRunning;
+// ── Log terminal ──────────────────────────────────────────────────────────────
+function appendLog({ hostname, line }) {
+  const box = $('logbox');
+  const row = document.createElement('div');
+  row.className = 'logline';
+  row.innerHTML = `<span class="loghostname ${hostColor(hostname)}">${hostname}</span><span class="logtext">${escHtml(line)}</span>`;
+  box.appendChild(row);
+  // Trim to 800 lines
+  while (box.children.length > 800) box.removeChild(box.firstChild);
+  if (autoscroll) box.scrollTop = box.scrollHeight;
 }
 
-// ── Actions ─────────────────────────────────────────────────────────────────────
-async function addToCluster(hostname, card) {
-  const btn  = card.querySelector('.card-btn');
-  const user = sshOverrides[hostname] || state.usernames[hostname] || getGuessUser(hostname) || '';
+function clearLogs() { $('logbox').innerHTML = ''; }
+function toggleAutoscroll() {
+  autoscroll = !autoscroll;
+  $('autoscroll-btn').textContent = autoscroll ? 'autoscroll ✓' : 'autoscroll ✗';
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+async function addNode(h, card) {
+  const btn  = card.querySelector('.ncbtn');
+  const user = sshOverrides[h] || state.ssh_aliases[h] || state.usernames[h] || guessUser(h) || '';
   btn.disabled = true; btn.textContent = 'Adding…';
-  const res = await fetch(`/api/nodes/${hostname}/select`, {
-    method: 'POST', headers: {'Content-Type':'application/json'},
+  const r = await fetch(`/api/nodes/${h}/select`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ ssh_user: user }),
   });
   btn.disabled = false;
-  if (!res.ok) { const e = await res.json(); alert(`Error: ${e.detail}`); }
+  if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
-
-async function removeFromCluster(hostname) {
-  await fetch(`/api/nodes/${hostname}/deselect`, { method: 'POST' });
-}
+async function removeNode(h) { await fetch(`/api/nodes/${h}/deselect`, {method:'POST'}); }
 
 async function startTraining() {
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
-  const res = await fetch('/api/training/start', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ algorithm: document.getElementById('algo-select').value }),
+  const r = await fetch('/api/training/start', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ algorithm: $('algo-sel').value }),
   });
-  if (!res.ok) { const e = await res.json(); alert(`Start failed: ${e.detail}`); }
+  if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
-
 async function startInference() {
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
-  const res = await fetch('/api/inference/start', { method: 'POST' });
-  if (!res.ok) { const e = await res.json(); alert(`Inference failed: ${e.detail}`); }
+  const r = await fetch('/api/inference/start', { method:'POST' });
+  if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
-
+async function checkConn() {
+  const r = await fetch('/api/connectivity/check', { method:'POST' });
+  if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
+}
 async function stopAll() {
-  await fetch('/api/training/stop',  { method: 'POST' });
-  await fetch('/api/inference/stop', { method: 'POST' });
+  await fetch('/api/training/stop',  { method:'POST' });
+  await fetch('/api/inference/stop', { method:'POST' });
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────────
-function setText(id, val) {
-  const el = document.getElementById(id);
-  if (el && el.textContent !== String(val)) el.textContent = val;
-}
-
-function getGuessUser(hostname) {
-  const m = hostname.match(/macmini(\d+)/i);
-  return m ? `yuvrajsingh${m[1]}` : '';
-}
-
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function $(id)      { return document.getElementById(id); }
+function setText(id, v) { const e=$(id); if(e && e.textContent!==String(v)) e.textContent=v; }
+function guessUser(h) { const m=h.match(/macmini(\d+)/i); return m?`yuvrajsingh${m[1]}`:''; }
+function escHtml(s)   { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function nodeIcon(n) {
-  const os   = (n.os   || '').toLowerCase();
-  const host = (n.hostname || '').toLowerCase();
-  if (host.includes('ipad'))               return '&#x1F4F1;';
-  if (host.includes('pi') || host.includes('rasp')) return '&#x1F353;';
-  if (host.includes('win'))                return '&#x1F5A5;';
-  if (os === 'darwin' || host.includes('mac')) return '&#x1F4BB;';
-  if (os === 'linux')                      return '&#x1F427;';
-  return '&#x1F4BB;';
+  const os=((n.os||'').toLowerCase()), h=((n.hostname||'').toLowerCase());
+  if(h.includes('ipad')) return '📱';
+  if(h.includes('pi')||h.includes('rasp')) return '🍓';
+  if(h.includes('win')) return '🖥️';
+  if(os==='darwin'||h.includes('mac')) return '💻';
+  if(os==='linux') return '🐧';
+  return '💻';
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// ── Topology Canvas ──────────────────────────────────────────────────────────────
-// ════════════════════════════════════════════════════════════════════════════════
-
-const canvas = document.getElementById('topo');
-const ctx    = canvas.getContext('2d');
-let particles = [];
-let lastSpawn = 0;
+// ════════════════════════════════════════════════════════════════════════════
+// ═══ Topology Canvas ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+const CVS = $('topo');
+const CTX = CVS.getContext('2d');
 const DPR = window.devicePixelRatio || 1;
+let particles = [];
+let spawnTs   = 0;
 
-// Resize canvas to match its CSS size
-function resizeCanvas() {
-  const w = canvas.offsetWidth;
-  const h = canvas.offsetHeight;
-  if (canvas.width !== w * DPR || canvas.height !== h * DPR) {
-    canvas.width  = w * DPR;
-    canvas.height = h * DPR;
-    ctx.scale(DPR, DPR);
+// ── Resize ────────────────────────────────────────────────────────────────────
+function resizeCvs() {
+  const w = CVS.offsetWidth, h = CVS.offsetHeight;
+  if (CVS.width !== w * DPR || CVS.height !== h * DPR) {
+    CVS.width  = w * DPR;
+    CVS.height = h * DPR;
+    CTX.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
 }
-new ResizeObserver(resizeCanvas).observe(canvas);
+new ResizeObserver(resizeCvs).observe(CVS);
 
-// Build the layout from state
-function getTopoLayout() {
-  const W = canvas.width  / DPR;
-  const H = canvas.height / DPR;
-
-  // Merge selected + running; running takes priority
+// ── Layout ────────────────────────────────────────────────────────────────────
+function getLayout() {
+  const W = CVS.width / DPR, H = CVS.height / DPR;
   const all = {};
-  for (const [h, v] of Object.entries(state.selected))
-    all[h] = { ...v, active: false };
-  for (const [h, v] of Object.entries(state.running))
-    all[h] = { ...v, active: v.status === 'running' || true };
+  for (const [h,v] of Object.entries(state.selected)) all[h] = {...v, running:false};
+  for (const [h,v] of Object.entries(state.running))  all[h] = {...v, running:true};
 
-  let server = null;
-  const workers = [];
-  for (const [hostname, info] of Object.entries(all)) {
-    if (info.rank === 0 || info.role === 'server') server = { hostname, ...info };
-    else workers.push({ hostname, ...info });
+  let server = null; const workers = [];
+  for (const [h, info] of Object.entries(all)) {
+    if (info.rank === 0 || info.role === 'server') server = {h, ...info};
+    else workers.push({h, ...info});
   }
-  workers.sort((a, b) => a.rank - b.rank);
+  workers.sort((a,b)=>a.rank-b.rank);
 
-  // Determine topology type from selected algorithm
-  const algo = document.getElementById('algo-select').value;
-  const hasServer = !['classicdp', 'fsdp', 'ep', 'mp_pipeline'].includes(algo);
+  const algo = $('algo-sel').value;
+  const hasServer = !['classicdp','fsdp','ep','mp_pipeline'].includes(algo);
 
-  const serverX = W / 2, serverY = H * 0.20;
-  const workerY = H * 0.72;
+  const sx = W/2, sy = H * 0.22;
+  const wy = H * 0.74;
   const nw = workers.length;
-  const maxSpacing = Math.min(160, nw > 1 ? (W - 120) / (nw - 1) : 0);
-  const startX = W / 2 - (nw - 1) * maxSpacing / 2;
+  const sp = nw > 1 ? Math.min(155, (W - 100) / (nw-1)) : 0;
+  const wx0 = W/2 - (nw-1)*sp/2;
 
-  const workerNodes = workers.map((w, i) => ({
-    ...w, x: startX + i * maxSpacing, y: workerY,
-  }));
-
-  return { W, H, server: server ? { ...server, x: serverX, y: serverY } : null,
-           workers: workerNodes, hasServer };
+  return {
+    W, H,
+    server: server ? {...server, x:sx, y:sy} : null,
+    workers: workers.map((w,i) => ({...w, x: wx0 + i*sp, y: wy})),
+    hasServer,
+  };
 }
 
-// Quadratic bezier point
-function bezierPt(t, x0, y0, cpx, cpy, x1, y1) {
-  const mt = 1 - t;
-  return { x: mt*mt*x0 + 2*mt*t*cpx + t*t*x1, y: mt*mt*y0 + 2*mt*t*cpy + t*t*y1 };
+// ── Draw grid background ───────────────────────────────────────────────────────
+function drawGrid(W, H) {
+  const s = 32;
+  CTX.save();
+  CTX.fillStyle = 'rgba(15,41,38,0.035)';
+  for (let x = s; x < W; x += s)
+    for (let y = s; y < H; y += s) {
+      CTX.beginPath(); CTX.arc(x, y, 1, 0, Math.PI*2); CTX.fill();
+    }
+  CTX.restore();
 }
 
-// Draw one connection line (two offset bezier curves for up/down lanes)
-function drawConnection(x0, y0, x1, y1, active) {
-  const cpx = (x0 + x1) / 2;
-  const cpy = (y0 + y1) / 2;
-  const offset = 18;
+// ── Draw bezier connection ─────────────────────────────────────────────────────
+function drawConn(x0,y0,x1,y1, active) {
+  const cpx = (x0+x1)/2, cpy = (y0+y1)/2;
+  const off = 20;
 
-  // Up lane (worker→server)
-  ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  ctx.quadraticCurveTo(cpx - offset, cpy, x1, y1);
-  ctx.strokeStyle = active ? 'rgba(26,158,99,0.45)' : 'rgba(16,42,40,0.1)';
-  ctx.lineWidth = active ? 1.5 : 1;
-  ctx.stroke();
+  // up lane (worker→server gradient)
+  CTX.beginPath(); CTX.moveTo(x0,y0);
+  CTX.quadraticCurveTo(cpx-off, cpy, x1,y1);
+  CTX.strokeStyle = active ? 'rgba(26,158,99,0.45)' : 'rgba(15,41,38,0.1)';
+  CTX.lineWidth = active ? 1.6 : 1; CTX.stroke();
 
-  // Down lane (server→worker)
-  ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  ctx.quadraticCurveTo(cpx + offset, cpy, x1, y1);
-  ctx.strokeStyle = active ? 'rgba(208,106,47,0.38)' : 'rgba(16,42,40,0.07)';
-  ctx.lineWidth = active ? 1.2 : 0.8;
-  ctx.stroke();
+  // down lane (server→worker weights)
+  CTX.beginPath(); CTX.moveTo(x0,y0);
+  CTX.quadraticCurveTo(cpx+off, cpy, x1,y1);
+  CTX.strokeStyle = active ? 'rgba(208,106,47,0.38)' : 'rgba(15,41,38,0.06)';
+  CTX.lineWidth = active ? 1.2 : 0.8; CTX.stroke();
 }
 
-// Draw a node circle
-function drawNode(x, y, label, sublabel, isServer, isActive, inferStatus) {
-  const r  = 34;
-  const fc = isServer ? 'rgba(208,106,47,0.13)' : 'rgba(23,126,137,0.1)';
-  const sc = isServer ? '#d06a2f' : '#177e89';
+// ── Draw node ──────────────────────────────────────────────────────────────────
+function drawNode(x, y, label, sub, isServer, isActive, inferOk) {
+  const r  = 36;
+  const ac = isServer ? '#d06a2f' : '#177e89';
+  const af = isServer ? 'rgba(208,106,47,0.13)' : 'rgba(23,126,137,0.1)';
 
-  // Glow pulse when active
+  // Outer glow when active
   if (isActive) {
-    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 400);
-    ctx.beginPath();
-    ctx.arc(x, y, r + 10, 0, Math.PI * 2);
-    const g = ctx.createRadialGradient(x, y, r, x, y, r + 10);
-    const alpha = (0.12 + 0.1 * pulse).toFixed(2);
-    g.addColorStop(0, isServer ? `rgba(208,106,47,${alpha})` : `rgba(23,126,137,${alpha})`);
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 380);
+    const g = CTX.createRadialGradient(x,y, r, x,y, r+14);
+    g.addColorStop(0, isServer ? `rgba(208,106,47,${(0.18+0.1*pulse).toFixed(2)})` : `rgba(23,126,137,${(0.18+0.1*pulse).toFixed(2)})`);
     g.addColorStop(1, 'transparent');
-    ctx.fillStyle = g;
-    ctx.fill();
+    CTX.beginPath(); CTX.arc(x,y,r+14,0,Math.PI*2);
+    CTX.fillStyle = g; CTX.fill();
   }
 
-  // Fill + stroke
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fillStyle = fc;
-  ctx.fill();
-  ctx.strokeStyle = sc;
-  ctx.lineWidth = isActive ? 2 : 1.5;
-  ctx.stroke();
+  // Outer ring
+  CTX.beginPath(); CTX.arc(x,y,r+4,0,Math.PI*2);
+  CTX.strokeStyle = `${ac}22`; CTX.lineWidth = 1; CTX.stroke();
 
-  // Inference status badge (top-right)
-  if (inferStatus !== undefined) {
-    const bx = x + r * 0.72, by = y - r * 0.72;
-    ctx.beginPath();
-    ctx.arc(bx, by, 7, 0, Math.PI * 2);
-    ctx.fillStyle = inferStatus === 'ok' ? '#1a9e63' : inferStatus === 'wait' ? '#f39c12' : '#ccc';
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 9px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(inferStatus === 'ok' ? '✓' : '…', bx, by);
+  // Fill
+  CTX.beginPath(); CTX.arc(x,y,r,0,Math.PI*2);
+  CTX.fillStyle = af; CTX.fill();
+  CTX.strokeStyle = ac; CTX.lineWidth = isActive ? 2 : 1.5; CTX.stroke();
+
+  // Active dot (top right)
+  if (isActive) {
+    CTX.beginPath(); CTX.arc(x + r*.7, y - r*.7, 5.5, 0, Math.PI*2);
+    CTX.fillStyle = '#1a9e63'; CTX.fill();
+    CTX.fillStyle = '#fff';
+    CTX.font = 'bold 8px sans-serif'; CTX.textAlign='center'; CTX.textBaseline='middle';
+    CTX.fillText('●', x+r*.7, y-r*.7);
   }
 
-  // Text
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = sc;
-  ctx.font = `700 11px 'IBM Plex Mono', monospace`;
-  ctx.fillText(label, x, y - 7);
+  // Infer status badge
+  if (inferOk !== undefined) {
+    const bx = x+r*.7, by = y-r*.7;
+    CTX.beginPath(); CTX.arc(bx, by, 7, 0, Math.PI*2);
+    CTX.fillStyle = inferOk ? '#1a9e63' : '#f39c12'; CTX.fill();
+    CTX.fillStyle = '#fff';
+    CTX.font = 'bold 9px sans-serif'; CTX.textAlign='center'; CTX.textBaseline='middle';
+    CTX.fillText(inferOk ? '✓' : '…', bx, by);
+  }
 
-  const short = sublabel.length > 10 ? sublabel.slice(0, 9) + '…' : sublabel;
-  ctx.fillStyle = '#31524f';
-  ctx.font = `500 9.5px 'IBM Plex Mono', monospace`;
-  ctx.fillText(short, x, y + 8);
+  // Labels
+  CTX.textAlign='center'; CTX.textBaseline='middle';
+  CTX.fillStyle = ac;
+  CTX.font = `700 11.5px 'IBM Plex Mono', monospace`;
+  CTX.fillText(label, x, y - 8);
+
+  const short = sub.length > 10 ? sub.slice(0,9)+'…' : sub;
+  CTX.fillStyle = '#5a7a77';
+  CTX.font = `500 9.5px 'IBM Plex Mono', monospace`;
+  CTX.fillText(short, x, y + 8);
 }
 
-// Main draw loop
-function drawFrame(ts) {
-  resizeCanvas();
-  const { W, H, server, workers } = getTopoLayout();
-  ctx.clearRect(0, 0, W, H);
+// ── Bezier point ──────────────────────────────────────────────────────────────
+function bp(t, x0,y0, cpx,cpy, x1,y1) {
+  const m = 1-t;
+  return { x: m*m*x0 + 2*m*t*cpx + t*t*x1, y: m*m*y0 + 2*m*t*cpy + t*t*y1 };
+}
 
-  const isTraining = Object.values(state.running).some(r => r.algorithm !== 'infer');
+// ── Main draw loop ─────────────────────────────────────────────────────────────
+function draw(ts) {
+  resizeCvs();
+  const {W, H, server, workers} = getLayout();
+  CTX.clearRect(0, 0, W, H);
+  drawGrid(W, H);
+
+  const isTraining  = Object.values(state.running).some(r => r.algorithm !== 'infer');
   const isInferring = Object.values(state.running).some(r => r.algorithm === 'infer');
-  const isActive = isTraining || isInferring;
+  const isActive    = isTraining || isInferring;
 
-  // Update algo label
-  const algoLabel = document.getElementById('topo-algo-label');
-  if (isActive) {
-    const firstAlgo = Object.values(state.running)[0]?.algorithm || '';
-    algoLabel.textContent = firstAlgo === 'infer' ? 'CONNECTIVITY TEST' : firstAlgo.toUpperCase() + ' TOPOLOGY';
+  // Algo label
+  const tag = $('topo-tag');
+  const allInCluster = {...state.selected, ...state.running};
+  if (Object.keys(allInCluster).length) {
+    const algo = isActive
+      ? (isInferring ? 'INFERENCE' : $('algo-sel').value.toUpperCase() + ' TOPOLOGY')
+      : ($('algo-sel').value.toUpperCase() + ' TOPOLOGY');
+    tag.textContent = algo;
   } else {
-    algoLabel.textContent = Object.keys(state.selected).length + Object.keys(state.running).length > 0
-      ? document.getElementById('algo-select').value.toUpperCase() + ' TOPOLOGY' : '';
+    tag.textContent = '';
   }
 
   // Legend
-  document.getElementById('topo-legend').style.display = isTraining ? '' : 'none';
+  $('topo-legend').style.display = isTraining ? '' : 'none';
 
   // Empty state
-  if (!server && workers.length === 0) {
-    ctx.fillStyle = 'rgba(16,42,40,0.22)';
-    ctx.font = `14px 'Space Grotesk', sans-serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('Add nodes from the left panel to build your cluster', W/2, H/2);
-    requestAnimationFrame(drawFrame);
-    return;
+  if (!server && !workers.length) {
+    CTX.fillStyle = 'rgba(15,41,38,0.2)';
+    CTX.font = `14px 'Space Grotesk', sans-serif`;
+    CTX.textAlign = 'center'; CTX.textBaseline = 'middle';
+    CTX.fillText('Add nodes from the left panel', W/2, H/2-10);
+    CTX.font = `12px 'Space Grotesk', sans-serif`;
+    CTX.fillStyle = 'rgba(15,41,38,0.12)';
+    CTX.fillText('Cluster topology will appear here', W/2, H/2+14);
+    requestAnimationFrame(draw); return;
   }
 
-  // Lines
+  // Connections
   if (server) {
     workers.forEach(w => {
-      const wActive = isActive && (w.hostname in state.running);
-      drawConnection(server.x, server.y, w.x, w.y, wActive);
+      drawConn(server.x, server.y, w.x, w.y, isActive && w.running);
     });
   } else if (workers.length >= 2) {
-    // All-to-all / ring for server-less algos
-    for (let i = 0; i < workers.length; i++) {
-      for (let j = i + 1; j < workers.length; j++) {
-        const bothActive = isActive && (workers[i].hostname in state.running) && (workers[j].hostname in state.running);
-        const a = workers[i], b = workers[j];
-        drawConnection(a.x, a.y, b.x, b.y, bothActive);
-      }
-    }
+    for (let i=0;i<workers.length;i++)
+      for (let j=i+1;j<workers.length;j++)
+        drawConn(workers[i].x,workers[i].y,workers[j].x,workers[j].y,
+                 isActive && workers[i].running && workers[j].running);
   }
 
   // Spawn particles
-  if (isActive && ts - lastSpawn > 350) {
-    const connections = server
-      ? workers.filter(w => w.hostname in state.running).map(w => ({ srv: server, wkr: w }))
-      : [];
-
-    connections.forEach(({ srv, wkr }) => {
-      // Gradient up: worker → server
-      particles.push({
-        sx: wkr.x, sy: wkr.y, ex: srv.x, ey: srv.y,
-        cpOff: -18, t: 0, speed: 0.008 + Math.random() * 0.004,
-        color: '26,158,99', size: 3.8,
-      });
-      // Weights down: server → worker (offset start)
-      particles.push({
-        sx: srv.x, sy: srv.y, ex: wkr.x, ey: wkr.y,
-        cpOff: +18, t: 0.25 + Math.random() * 0.1, speed: 0.007 + Math.random() * 0.004,
-        color: '208,106,47', size: 3.2,
-      });
+  if (isActive && server && ts - spawnTs > 380) {
+    workers.filter(w => w.running).forEach(w => {
+      // gradient up
+      particles.push({sx:w.x,sy:w.y, ex:server.x,ey:server.y, cpOff:-20,
+                      t:0, speed:0.007+Math.random()*.004, col:'26,158,99', sz:4});
+      // weights down
+      particles.push({sx:server.x,sy:server.y, ex:w.x,ey:w.y, cpOff:+20,
+                      t:0.2+Math.random()*.15, speed:0.006+Math.random()*.004, col:'208,106,47', sz:3.5});
     });
-    lastSpawn = ts;
+    spawnTs = ts;
   }
 
-  // Update + draw particles
-  particles = particles.filter(p => {
-    p.t += p.speed;
-    return p.t < 1;
-  });
-
+  // Move + draw particles
+  particles = particles.filter(p => { p.t += p.speed; return p.t < 1; });
   particles.forEach(p => {
-    const cpx = (p.sx + p.ex) / 2 + p.cpOff;
-    const cpy = (p.sy + p.ey) / 2;
-    const { x, y } = bezierPt(p.t, p.sx, p.sy, cpx, cpy, p.ex, p.ey);
-    const fade = Math.min(1, Math.sin(p.t * Math.PI) * 1.4);
-    ctx.beginPath();
-    ctx.arc(x, y, p.size, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(${p.color},${fade.toFixed(2)})`;
-    ctx.fill();
+    const cpx = (p.sx+p.ex)/2 + p.cpOff, cpy = (p.sy+p.ey)/2;
+    const {x,y} = bp(p.t, p.sx,p.sy, cpx,cpy, p.ex,p.ey);
+    const fade = Math.min(1, Math.sin(p.t * Math.PI) * 1.5);
+    CTX.beginPath(); CTX.arc(x, y, p.sz, 0, Math.PI*2);
+    CTX.fillStyle = `rgba(${p.col},${fade.toFixed(2)})`; CTX.fill();
+    // tiny trail
+    const tTrail = Math.max(0, p.t - 0.05);
+    const {x:tx, y:ty} = bp(tTrail, p.sx,p.sy, cpx,cpy, p.ex,p.ey);
+    CTX.beginPath(); CTX.arc(tx, ty, p.sz*.5, 0, Math.PI*2);
+    CTX.fillStyle = `rgba(${p.col},${(fade*.35).toFixed(2)})`; CTX.fill();
   });
 
-  // Build inference connected set
-  const inferConnected = new Set((state.inference?.workers || []).map(w => w.hostname));
+  // Infer connected set (for badges)
+  const inferWorkers = new Set((state.connectivity?.workers || []).map(w=>w.hostname));
 
   // Draw nodes
   if (server) {
-    const serverRunning = server.hostname in state.running;
-    let inferStatus;
-    if (isInferring) inferStatus = serverRunning ? 'ok' : 'wait';
-    drawNode(server.x, server.y, 'SERVER', server.hostname, true, serverRunning, inferStatus);
+    const sActive = server.running;
+    let inferBadge;
+    if (isInferring) inferBadge = inferWorkers.has(server.h);
+    drawNode(server.x, server.y, 'SERVER', server.h, true, sActive, inferBadge);
   }
-
   workers.forEach(w => {
-    const wRunning = w.hostname in state.running;
-    let inferStatus;
-    if (isInferring) inferStatus = inferConnected.has(w.hostname) ? 'ok' : 'wait';
-    drawNode(w.x, w.y, `RANK ${w.rank}`, w.hostname, false, wRunning, inferStatus);
+    let inferBadge;
+    if (isInferring) inferBadge = inferWorkers.has(w.h);
+    drawNode(w.x, w.y, `RANK ${w.rank}`, w.h, false, w.running, inferBadge);
   });
 
-  requestAnimationFrame(drawFrame);
+  requestAnimationFrame(draw);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
 // Boot
-requestAnimationFrame(drawFrame);
+// ════════════════════════════════════════════════════════════════════════════
+requestAnimationFrame(draw);
 startSSE();
+startLogs();
 </script>
 </body>
 </html>

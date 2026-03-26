@@ -1,43 +1,81 @@
 """
-NodeManager: manages cluster node selection and training process lifecycle.
+NodeManager: manages cluster node selection and process lifecycle.
 
 Flow:
     select(hostname, ssh_user)      — mark a node as "ready" (no SSH yet)
     deselect(hostname)              — unmark
-    start_training(algorithm, ...)  — SSH + launch server + all selected workers
+    start_training(algorithm, ...)  — launch server locally + SSH workers
+    start_inference(server_host)    — launch infer server + SSH workers
     stop_training()                 — kill everything
-    probe_username(hostname, user)  — SSH whoami to get the real username
+    probe_username(hostname, user)  — SSH whoami
 """
 
 import asyncio
 import logging
+import os
 import shlex
 import subprocess
-from typing import Dict, Optional
+import time
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 REMOTE_REPO = "~/smolcluster"
+LOG_MAXLINES = 500  # global circular buffer
+
+
+def _build_ssh_target(ssh_user: str, hostname: str) -> str:
+    """
+    Build the SSH target from whatever the user provided:
+      - bare alias  "mini2"               → use as-is  (SSH config handles user+key)
+      - username    "yuvrajsingh2"        → "yuvrajsingh2@hostname.local"
+      - user@host   "yuvrajsingh2@mini2"  → use as-is
+      - empty                             → "hostname.local"
+    Heuristic: a bare alias has no '@' and no '.' in it.
+    """
+    if not ssh_user:
+        return f"{hostname}.local"
+    if "@" in ssh_user:       # already fully qualified
+        return ssh_user
+    if "." not in ssh_user:   # bare alias like "mini2"
+        return ssh_user
+    return f"{ssh_user}@{hostname}.local"
 
 
 class NodeManager:
     """
-    selected:  hostname → {ssh_user, rank}        — user clicked "Add to Cluster"
-    processes: hostname → {proc, rank, algorithm}  — actually running SSH procs
+    selected:  hostname → {ssh_user, rank}
+    processes: hostname → {proc, rank, algorithm, role}
     """
 
     def __init__(self):
         self.selected:  Dict[str, dict] = {}
         self.processes: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        # Log streaming — global ordered list, trimmed to LOG_MAXLINES
+        self._logs: List[dict] = []
+        self._log_seq = 0
 
-    # ── Selection (no SSH) ─────────────────────────────────────────────────────
+    # ── Log helpers ────────────────────────────────────────────────────────────
 
-    async def select(self, hostname: str, ssh_user: str = "", rank: Optional[int] = None) -> int:
+    def _log(self, hostname: str, line: str):
+        self._log_seq += 1
+        self._logs.append({"seq": self._log_seq, "hostname": hostname,
+                            "line": line, "ts": time.time()})
+        if len(self._logs) > LOG_MAXLINES:
+            self._logs = self._logs[-LOG_MAXLINES:]
+
+    def logs_since(self, seq: int = 0) -> List[dict]:
+        return [l for l in self._logs if l["seq"] > seq]
+
+    # ── Selection ──────────────────────────────────────────────────────────────
+
+    async def select(self, hostname: str, ssh_user: str = "",
+                     rank: Optional[int] = None) -> int:
         async with self._lock:
             if rank is None:
-                existing_ranks = {v["rank"] for v in self.selected.values()}
-                rank = next(r for r in range(1, 100) if r not in existing_ranks)
+                taken = {v["rank"] for v in self.selected.values()}
+                rank = next(r for r in range(1, 100) if r not in taken)
             self.selected[hostname] = {"ssh_user": ssh_user, "rank": rank}
         logger.info(f"[node_manager] Selected {hostname} as rank {rank}")
         return rank
@@ -50,35 +88,33 @@ class NodeManager:
     # ── Training lifecycle ─────────────────────────────────────────────────────
 
     async def start_training(self, algorithm: str, server_hostname: str) -> None:
-        """
-        1. Launch training server on this machine (server_hostname).
-        2. SSH into each selected node and start a worker.
-        """
         async with self._lock:
             if self.processes:
-                raise ValueError("Training already running — stop it first")
+                raise ValueError("Already running — stop it first")
 
-        # Start server process locally
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
+        # ── Server (local) ────────────────────────────────────────────────────
         server_cmd = [
             "uv", "run", "python", "-m", "smolcluster.train",
-            "server", server_hostname,
-            "--algorithm", algorithm,
+            "server", server_hostname, "--algorithm", algorithm,
         ]
-        logger.info(f"[node_manager] Starting server: {shlex.join(server_cmd)}")
-        server_proc = subprocess.Popen(server_cmd)
-
+        self._log(server_hostname, f"$ {shlex.join(server_cmd)}")
+        proc = await asyncio.create_subprocess_exec(
+            *server_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
         async with self._lock:
             self.processes[server_hostname] = {
-                "rank": 0,
-                "algorithm": algorithm,
-                "proc": server_proc,
-                "role": "server",
+                "rank": 0, "algorithm": algorithm, "role": "server", "proc": proc,
             }
+        asyncio.create_task(self._stream(server_hostname, proc))
 
-        # Give server a moment to bind its socket
-        await asyncio.sleep(2)
+        await asyncio.sleep(2)  # let server bind socket
 
-        # Start workers on selected nodes
+        # ── Workers (SSH) ─────────────────────────────────────────────────────
         async with self._lock:
             selected = dict(self.selected)
 
@@ -87,55 +123,62 @@ class NodeManager:
                 continue
             rank = info["rank"]
             ssh_user = info.get("ssh_user", "")
-            target = f"{ssh_user}@{hostname}.local" if ssh_user else f"{hostname}.local"
-            worker_cmd = [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=15",
-                target,
-                f"cd {REMOTE_REPO} && uv run python -m smolcluster.train "
-                f"worker {rank} {hostname} --algorithm {algorithm}",
-            ]
-            logger.info(f"[node_manager] Starting worker {hostname} rank {rank}")
-            proc = subprocess.Popen(worker_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            target = _build_ssh_target(ssh_user, hostname)
+            remote = (
+                f"cd {REMOTE_REPO} && PYTHONUNBUFFERED=1 "
+                f"uv run python -m smolcluster.train "
+                f"worker {rank} {hostname} --algorithm {algorithm}"
+            )
+            cmd = ["ssh", "-o", "StrictHostKeyChecking=no",
+                   "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                   target, remote]
+            self._log(hostname, f"$ ssh {target} [rank {rank}]")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
             async with self._lock:
                 self.processes[hostname] = {
-                    "rank": rank,
-                    "algorithm": algorithm,
-                    "proc": proc,
-                    "role": "worker",
+                    "rank": rank, "algorithm": algorithm, "role": "worker", "proc": proc,
                 }
-            asyncio.create_task(self._monitor(hostname, proc))
+            asyncio.create_task(self._stream(hostname, proc))
 
-        asyncio.create_task(self._monitor(server_hostname, server_proc))
+    # ── Inference lifecycle ────────────────────────────────────────────────────
 
     async def start_inference(self, server_hostname: str) -> None:
         """
-        Launch inference connectivity test:
-          1. Start infer server locally.
-          2. SSH each selected node to run the infer worker.
+        Launch infer server locally + SSH each selected worker to run infer worker.
         """
         async with self._lock:
             if self.processes:
-                raise ValueError("Training/inference already running — stop it first")
+                raise ValueError("Already running — stop it first")
 
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         num_workers = len(self.selected)
+
+        # ── Infer server (local) ──────────────────────────────────────────────
         server_cmd = [
             "uv", "run", "python", "-m", "smolcluster.applications.infer",
             "server", server_hostname, str(num_workers),
         ]
-        logger.info(f"[node_manager] Starting infer server: {shlex.join(server_cmd)}")
-        server_proc = subprocess.Popen(server_cmd)
-
+        self._log(server_hostname, f"$ {shlex.join(server_cmd)}")
+        proc = await asyncio.create_subprocess_exec(
+            *server_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
         async with self._lock:
             self.processes[server_hostname] = {
-                "rank": 0, "algorithm": "infer",
-                "proc": server_proc, "role": "server",
+                "rank": 0, "algorithm": "infer", "role": "server", "proc": proc,
             }
+        asyncio.create_task(self._stream(server_hostname, proc))
 
         await asyncio.sleep(1)
 
+        # ── Workers (SSH) ─────────────────────────────────────────────────────
         async with self._lock:
             selected = dict(self.selected)
 
@@ -144,26 +187,27 @@ class NodeManager:
                 continue
             rank = info["rank"]
             ssh_user = info.get("ssh_user", "")
-            target = f"{ssh_user}@{hostname}.local" if ssh_user else f"{hostname}.local"
-            worker_cmd = [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=15",
-                target,
-                f"cd {REMOTE_REPO} && uv run python -m smolcluster.applications.infer "
-                f"worker {rank} {hostname} {server_hostname}",
-            ]
-            logger.info(f"[node_manager] Starting infer worker {hostname} rank {rank}")
-            proc = subprocess.Popen(worker_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            target = _build_ssh_target(ssh_user, hostname)
+            remote = (
+                f"cd {REMOTE_REPO} && PYTHONUNBUFFERED=1 "
+                f"uv run python -m smolcluster.applications.infer "
+                f"worker {rank} {hostname} {server_hostname}"
+            )
+            cmd = ["ssh", "-o", "StrictHostKeyChecking=no",
+                   "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                   target, remote]
+            self._log(hostname, f"$ ssh {target} → infer worker rank {rank}")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
             async with self._lock:
                 self.processes[hostname] = {
-                    "rank": rank, "algorithm": "infer",
-                    "proc": proc, "role": "worker",
+                    "rank": rank, "algorithm": "infer", "role": "worker", "proc": proc,
                 }
-            asyncio.create_task(self._monitor(hostname, proc))
-
-        asyncio.create_task(self._monitor(server_hostname, server_proc))
+            asyncio.create_task(self._stream(hostname, proc))
 
     async def stop_training(self) -> None:
         async with self._lock:
@@ -171,11 +215,11 @@ class NodeManager:
             self.processes.clear()
 
         for hostname, info in procs.items():
-            proc: subprocess.Popen = info["proc"]
-            if proc.poll() is None:
+            proc = info["proc"]
+            if proc.returncode is None:
                 proc.terminate()
                 try:
-                    await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5.0)
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     proc.kill()
             logger.info(f"[node_manager] Stopped {hostname}")
@@ -184,47 +228,32 @@ class NodeManager:
 
     @staticmethod
     async def probe_username(hostname: str, ssh_user: str = "") -> Optional[str]:
-        """
-        SSH to hostname.local and run `whoami`.
-        Returns the username string, or None if unreachable / auth failed.
-        """
-        target = f"{ssh_user}@{hostname}.local" if ssh_user else f"{hostname}.local"
-        cmd = [
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",          # never prompt for password
-            "-o", "ConnectTimeout=5",
-            target, "whoami",
-        ]
+        target = _build_ssh_target(ssh_user, hostname)
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no",
+               "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+               target, "whoami"]
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    subprocess.run, cmd,
-                    capture_output=True, text=True
-                ),
+                asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True),
                 timeout=8.0,
             )
             if result.returncode == 0:
                 return result.stdout.strip()
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
             logger.debug(f"[node_manager] probe {hostname}: {e}")
         return None
 
     # ── Snapshots ──────────────────────────────────────────────────────────────
 
     def snapshot_selected(self) -> Dict[str, dict]:
-        return {
-            h: {"rank": v["rank"], "ssh_user": v["ssh_user"]}
-            for h, v in self.selected.items()
-        }
+        return {h: {"rank": v["rank"], "ssh_user": v["ssh_user"]}
+                for h, v in self.selected.items()}
 
     def snapshot_processes(self) -> Dict[str, dict]:
         return {
             h: {
-                "rank": v["rank"],
-                "algorithm": v["algorithm"],
-                "role": v["role"],
-                "status": _proc_status(v["proc"]),
+                "rank": v["rank"], "algorithm": v["algorithm"], "role": v["role"],
+                "status": "running" if v["proc"].returncode is None else f"exited:{v['proc'].returncode}",
             }
             for h, v in self.processes.items()
         }
@@ -236,13 +265,20 @@ class NodeManager:
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
-    async def _monitor(self, hostname: str, proc: subprocess.Popen) -> None:
-        await asyncio.to_thread(proc.wait)
-        async with self._lock:
-            self.processes.pop(hostname, None)
-        logger.info(f"[node_manager] {hostname} exited (rc={proc.returncode})")
-
-
-def _proc_status(proc: subprocess.Popen) -> str:
-    rc = proc.poll()
-    return "running" if rc is None else f"exited:{rc}"
+    async def _stream(self, hostname: str, proc) -> None:
+        """Read stdout/stderr, feed into log buffer, clean up on exit."""
+        try:
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    self._log(hostname, line)
+        except Exception as e:
+            logger.debug(f"[node_manager] stream {hostname}: {e}")
+        finally:
+            await proc.wait()
+            async with self._lock:
+                self.processes.pop(hostname, None)
+            logger.info(f"[node_manager] {hostname} exited (rc={proc.returncode})")
