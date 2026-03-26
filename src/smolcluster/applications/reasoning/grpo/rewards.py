@@ -13,7 +13,7 @@ def calculate_answer_reward(predicted_answer: float, true_answer: float) -> floa
     """
     if not math.isfinite(predicted_answer):
         return 0.0
-    return 1.0 if math.isclose(predicted_answer, float(true_answer), rel_tol=0.0, abs_tol=1e-6) else 0.0
+    return 2.0 if math.isclose(predicted_answer, float(true_answer), rel_tol=0.0, abs_tol=1e-6) else 0.0
 
 
 def calculate_formatted_reward(predicted_answer: str) -> float:

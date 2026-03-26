@@ -589,7 +589,7 @@ def main():
     """Main entry point for distributed training."""
     parser = argparse.ArgumentParser(description="Distributed GPT Training")
     parser.add_argument(
-        "mode", choices=["server", "worker"], help="Run as server or worker"
+        "mode", choices=["server", "worker", "dashboard"], help="Run as server, worker, or dashboard"
     )
     parser.add_argument("arg1", help="Hostname (server mode) or rank (worker mode)")
     parser.add_argument("arg2", nargs="?", help="Hostname (worker mode only)")
@@ -607,6 +607,14 @@ def main():
         default=None,
         help="Path to checkpoint to resume training from",
     )
+
+    # Dashboard shortcut — no further args needed
+    if len(sys.argv) >= 2 and sys.argv[1] == "dashboard":
+        from smolcluster.dashboard.__main__ import main as dashboard_main
+        import sys as _sys
+        _sys.argv = [_sys.argv[0]] + _sys.argv[2:]  # strip "dashboard" so argparse in __main__ works
+        dashboard_main()
+        return
 
     # Handle both new argparse format and legacy positional format
     if len(sys.argv) >= 2 and sys.argv[1] in ["server", "worker"]:

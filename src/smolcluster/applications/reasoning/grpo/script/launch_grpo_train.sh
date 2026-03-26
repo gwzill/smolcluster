@@ -30,6 +30,7 @@ fi
 
 GRPO_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/reasoning/grpo/config.yaml"
 CLUSTER_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_inference.yaml"
+MODEL_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/model_config_inference.yaml"
 SESSION_NAME="grpo_train"
 VLLM_TMUX_SESSION="vllm_worker"
 
@@ -133,11 +134,12 @@ reset_all_vllm_workers() {
 }
 
 # SSH to a worker and start vLLM inside a named tmux session.
+# Args: host ip port rank model_dir
 start_vllm_on_worker() {
-    local host="$1" ip="$2" port="$3" rank="$4"
+    local host="$1" ip="$2" port="$3" rank="$4" model_dir="$5"
     local cmd
     cmd=$(printf '%s' "$VLLM_START_CMD" \
-        | sed "s|{model_dir}|${REMOTE_MODEL_DIR}|g" \
+        | sed "s|{model_dir}|${model_dir}|g" \
         | sed "s|{port}|${port}|g" \
         | sed "s|{rank}|${rank}|g" \
         | sed "s|{vllm_activate}|${VLLM_ACTIVATE}|g")
@@ -231,8 +233,8 @@ SERVER_HOST=$(yq '.server' "$CLUSTER_CONFIG")
 VLLM_PORT=$(yq '.vllm_cluster.port' "$GRPO_CONFIG")
 COMPLETION_PATH=$(yq '.vllm_cluster.completion_path' "$GRPO_CONFIG")
 VLLM_ACTIVATE=$(yq '.weight_sync.vllm_activate' "$GRPO_CONFIG")
-REMOTE_MODEL_DIR=$(yq '.weight_sync.remote_model_dir' "$GRPO_CONFIG")
 VLLM_START_CMD=$(yq '.weight_sync.vllm_start_cmd' "$GRPO_CONFIG")
+HF_MODEL_NAME=$(yq '.dp.hf_model_name' "$MODEL_CONFIG")
 HEALTH_RETRIES=$(yq '.weight_sync.health_retries // 30' "$GRPO_CONFIG")
 HEALTH_INTERVAL=$(yq '.weight_sync.health_interval // 5' "$GRPO_CONFIG")
 
@@ -289,6 +291,7 @@ echo "  Config:      $GRPO_CONFIG"
 echo "  Server:      $SERVER_HOST"
 echo "  Workers:     ${WORKER_HOSTS[*]}"
 echo "  Port/path:   $VLLM_PORT$COMPLETION_PATH"
+echo "  HF model:    $HF_MODEL_NAME"
 echo ""
 
 if [[ "$DRY_RUN" == "false" ]]; then
@@ -325,7 +328,7 @@ if [[ "$DRY_RUN" == "false" ]]; then
     echo ""
     echo "Starting vLLM on all workers ..."
     for i in "${!WORKER_HOSTS[@]}"; do
-        start_vllm_on_worker "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" "${WORKER_RANKS[$i]}"
+        start_vllm_on_worker "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" "${WORKER_RANKS[$i]}" "$HF_MODEL_NAME"
     done
 
     # 5. Wait for each worker's vLLM to pass /health

@@ -18,6 +18,8 @@ from smolcluster.applications.reasoning.grpo.utils import _scale_grads
 
 logger = logging.getLogger(__name__)
 
+_FLOAT_DTYPES = frozenset({mx.float16, mx.bfloat16, mx.float32})
+
 
 class GradScaler:
     """Scale loss before backward so reduced-precision gradients don't underflow.
@@ -174,9 +176,17 @@ class MasterWeightAdamW:
     def _init_state(self, model: Any) -> None:
         flat = tree_flatten(model.parameters())
         self._param_dtypes = {k: v.dtype for k, v in flat}
-        self._master_params = tree_unflatten([(k, v.astype(mx.float32)) for k, v in flat])
-        self._m = tree_unflatten([(k, mx.zeros(v.shape, dtype=mx.float32)) for k, v in flat])
-        self._v = tree_unflatten([(k, mx.zeros(v.shape, dtype=mx.float32)) for k, v in flat])
+        # Only cast floating-point params to float32 master weights.
+        # Integer params (uint32 packed int4) must NOT go through the lossy
+        # uint32→float32→uint32 round-trip — 99.8% of packed words are corrupted
+        # because float32 has only 24 bits of mantissa.
+        self._master_params = tree_unflatten([
+            (k, v.astype(mx.float32) if v.dtype in _FLOAT_DTYPES else v)
+            for k, v in flat
+        ])
+        float_flat = [(k, v) for k, v in flat if v.dtype in _FLOAT_DTYPES]
+        self._m = tree_unflatten([(k, mx.zeros(v.shape, dtype=mx.float32)) for k, v in float_flat])
+        self._v = tree_unflatten([(k, mx.zeros(v.shape, dtype=mx.float32)) for k, v in float_flat])
         mx.eval(self._master_params, self._m, self._v)
 
     def update(self, model: Any, grads: Any) -> None:
@@ -200,6 +210,13 @@ class MasterWeightAdamW:
         new_model_params = []
 
         for key, param in flat_master.items():
+            # Integer (quantized) params: non-differentiable, no optimizer state.
+            # Pass through unchanged — no cast, no update.
+            if self._param_dtypes[key] not in _FLOAT_DTYPES:
+                new_master.append((key, param))
+                new_model_params.append((key, param))
+                continue
+
             grad_tensor = flat_grads.get(key)
             if grad_tensor is None:
                 # Some parameters may be absent from the grad tree (for example

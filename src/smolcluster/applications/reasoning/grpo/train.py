@@ -801,7 +801,7 @@ from smolcluster.applications.reasoning.grpo.rewards import (
     calculate_answer_reward,
     calculate_formatted_reward,
 )
-from smolcluster.applications.reasoning.grpo.rollouts import build_batched_rollout_texts
+from smolcluster.applications.reasoning.grpo.rollouts import build_batched_rollout_texts, build_rollouts_per_prompt
 from smolcluster.applications.reasoning.grpo.utils import (
     _add_grads,
     _log_mem,
@@ -810,6 +810,7 @@ from smolcluster.applications.reasoning.grpo.utils import (
     get_mlx_device,
     iterate_batches,
     load_model,
+    apply_lora_if_quantized,
     tokenize_rollouts,
     parse_numeric_answer,
 )
@@ -864,9 +865,32 @@ def compute_ratio_stats(
     }
 
 
-def compute_advantages(rewards: mx.array, dtype: type = mx.float32) -> mx.array:
-    rewards_std = mx.std(rewards)
-    return (rewards - mx.mean(rewards)) / mx.maximum(rewards_std, mx.array(1e-3, dtype=dtype))
+def compute_advantages(
+    rewards: mx.array,
+    group_sizes: Optional[List[int]] = None,
+    dtype: type = mx.float32,
+) -> mx.array:
+    """Normalize rewards into advantages within each prompt's rollout group.
+
+    Args:
+        rewards: flat reward array [total_rollouts]
+        group_sizes: number of rollouts per prompt; if None falls back to
+                     normalizing across the whole batch (incorrect for GRPO
+                     but kept for backward compat)
+    """
+    if group_sizes is not None:
+        chunks = []
+        start = 0
+        for size in group_sizes:
+            if size == 0:
+                continue
+            group = rewards[start : start + size]
+            group_mean = mx.mean(group)
+            group_std = mx.std(group)
+            chunks.append((group - group_mean) / mx.maximum(group_std, mx.array(1e-6, dtype=dtype)))
+            start += size
+        return mx.concatenate(chunks) if chunks else mx.zeros_like(rewards)
+
 
 
 
@@ -903,7 +927,7 @@ def compute_logprobs(
     
     shift_mask = attention_mask[:, 1:]
     def _forward(ids: mx.array) -> mx.array:
-        # All [B, T, vocab_size] tensors live and die inside here.
+        # All [B, T, vocab_size] tensors live and die here.
         # Output is [B, T] so the backward graph stores nothing large.
         logits = model(ids)
         shift_logits = logits[:, :-1, :]
@@ -917,12 +941,13 @@ def compute_logprobs(
         token_logprobs = _forward(input_ids)
     
     valid_mask = mx.isfinite(token_logprobs)
-    non_nan_logprobs = mx.where(valid_mask, token_logprobs, 0.0)
-    
-    non_mask_logprobs = mx.where(shift_mask, non_nan_logprobs, 0.0)
-    counts = mx.sum(shift_mask, axis=1)
-    
-    return mx.sum(non_mask_logprobs, axis=1) / counts
+    final_mask = (shift_mask > 0) & valid_mask
+
+    filtered_logprobs = mx.where(final_mask, token_logprobs, 0.0)
+
+    counts = mx.sum(final_mask, axis=1)
+
+    return mx.sum(filtered_logprobs, axis=1) / (counts + 1e-8)
 
 
 def _compute_single_reward(
@@ -1016,7 +1041,8 @@ class RolloutPrefetcher:
     the optimizer step. Call get() at the top of the next step — it blocks only if
     compute finished faster than vLLM (rare).
 
-    Only active when grad_accum_steps == 1 (single micro-batch per step).
+    Returns rollouts per-prompt (not flattened) so the train loop can slice by
+    micro-batch index and works correctly with any grad_accum_steps value.
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -1026,12 +1052,13 @@ class RolloutPrefetcher:
 
     def submit(self, prompts: List[str], answers: List[str]) -> None:
         def _run() -> None:
-            result = build_batched_rollout_texts(prompts, answers, self._config)
+            result = build_rollouts_per_prompt(prompts, answers, self._config)
             self._queue.put(result)
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
 
-    def get(self) -> Tuple[List[str], List[str]]:
+    def get(self) -> List[Tuple[List[str], str]]:
+        """Return per-prompt rollouts: [(rollout_texts, true_answer), ...]."""
         return self._queue.get()
 
     def flush(self) -> None:
@@ -1059,16 +1086,23 @@ def train_step(
     device_stream: Optional[mx.Stream] = None,
     scaler: Optional[GradScaler] = None,
     prefetched_rollouts: Optional[Tuple[List[str], List[str]]] = None,
+    rollout_group_sizes: Optional[List[int]] = None,
 ) -> Optional[Tuple[Dict[str, float], Any]]:
     step_tag = f"[train_step epoch={epoch_idx + 1} step={step_in_epoch}/{total_steps_in_epoch}]"
 
     if prefetched_rollouts is not None:
         rollout_texts, rollout_targets = prefetched_rollouts
+        # rollout_group_sizes comes from the caller (train loop sliced per-prompt)
         logger.info("\n%s Using prefetched rollouts (%d)", step_tag, len(rollout_texts))
     else:
         logger.info("\n%s Generating rollouts for %d prompt(s) ...", step_tag, len(prompts))
         _t0 = time.time()
-        rollout_texts, rollout_targets = build_batched_rollout_texts(prompts, true_answers, config)
+        per_prompt = build_rollouts_per_prompt(prompts, true_answers, config)
+        rollout_group_sizes = [len(texts) for texts, _ in per_prompt]
+        rollout_texts, rollout_targets = [], []
+        for texts, ans in per_prompt:
+            rollout_texts.extend(texts)
+            rollout_targets.extend([ans] * len(texts))
         logger.info("%s [TIMING] rollout_gen: %.1fs", step_tag, time.time() - _t0)
 
     if not rollout_texts:
@@ -1090,7 +1124,7 @@ def train_step(
         float(mx.max(rewards).item()),
     )
     logger.info("%s Computing advantages ...", step_tag)
-    advantages = compute_advantages(rewards, dtype=dtype)
+    advantages = compute_advantages(rewards, group_sizes=rollout_group_sizes, dtype=dtype)
     rewards_std_value = float(mx.std(rewards).item())
     if rewards_std_value < 1e-8:
         logger.warning(
@@ -1151,6 +1185,7 @@ def train_step(
             accum_grads = chunk_grads
         else:
             accum_grads = _add_grads(accum_grads, chunk_grads)
+            mx.eval(accum_grads)  # materialize the sum; releases prev chunk grad buffers
 
     logger.info("%s Loss: %.6f  [TIMING] grad_loop: %.1fs", step_tag, total_loss, time.time() - _t_grad)
 
@@ -1263,9 +1298,7 @@ def train(
     checkpoint_dir = str(config.get("weight_sync", {}).get("checkpoint_dir", "checkpoints/grpo"))
 
     grad_accum_steps = int(config.get("grad_accum_steps", 1))
-    use_prefetch = bool(config.get("prefetch_rollouts", False)) and (grad_accum_steps == 1)
-    if bool(config.get("prefetch_rollouts", False)) and grad_accum_steps > 1:
-        logger.warning("prefetch_rollouts disabled: only supported when grad_accum_steps=1")
+    use_prefetch = bool(config.get("prefetch_rollouts", False))
     logger.info(
         "Starting MLX GRPO training for %s epochs (grad_accum_steps=%d, prefetch=%s)",
         total_epochs, grad_accum_steps, use_prefetch,
@@ -1311,7 +1344,6 @@ def train(
 
             # Process each micro-batch and accumulate gradients
             micro_idx = 0
-            pre_consumed = False
             for micro_step in range(0, num_prompts, micro_batch_size):
                 micro_idx += 1
                 end_idx = min(micro_step + micro_batch_size, num_prompts)
@@ -1322,6 +1354,22 @@ def train(
                         "\nstep %d — micro-batch %d/%d processing prompts...",
                         step_in_epoch, micro_idx, grad_accum_steps
                     )
+
+                # Slice prefetched rollouts for exactly this micro-batch's prompts
+                micro_pre = None
+                micro_group_sizes = None
+                if pre is not None:
+                    texts: List[str] = []
+                    targets: List[str] = []
+                    micro_group_sizes = []
+                    for rollout_texts, true_answer in pre[micro_step:end_idx]:
+                        micro_group_sizes.append(len(rollout_texts))
+                        texts.extend(rollout_texts)
+                        targets.extend([true_answer] * len(rollout_texts))
+                    if texts:
+                        micro_pre = (texts, targets)
+                    else:
+                        micro_group_sizes = None
 
                 result = train_step(
                     model=model,
@@ -1337,9 +1385,9 @@ def train(
                     device=device,
                     device_stream=mx.default_stream(device),
                     scaler=scaler,
-                    prefetched_rollouts=pre if not pre_consumed else None,
+                    prefetched_rollouts=micro_pre,
+                    rollout_group_sizes=micro_group_sizes,
                 )
-                pre_consumed = True
                 
                 if result is None:
                     logger.info(
@@ -1487,6 +1535,7 @@ def main() -> None:
 
     train_examples, val_examples = build_train_val_examples(grpo_config["data"])
     model, ref_model, tokenizer = load_model(dtype, grpo_config, model_config)
+    _lora_active = apply_lora_if_quantized(model, grpo_config)
     optimizer_name = grpo_config.get("optimizer", "adam").lower()
     amp_enabled = bool(grpo_config.get("amp", False))
     if optimizer_name == "sgd":

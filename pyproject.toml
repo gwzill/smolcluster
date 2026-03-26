@@ -28,7 +28,8 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "redis>=5.0.0",
     "mlx-lm",
-    "mlx"
+    "mlx",
+    "zeroconf>=0.132.0",
 ]
 
 [project.optional-dependencies]

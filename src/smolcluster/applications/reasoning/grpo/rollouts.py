@@ -275,16 +275,16 @@ def _fetch_for_prompt(
     return idx, texts, true_answer
 
 
-def build_batched_rollout_texts(
+def build_rollouts_per_prompt(
     prompts: List[str],
     true_answers: List[str],
     config: Dict[str, Any],
-) -> Tuple[List[str], List[str]]:
-    """Dispatch rollout generation for all prompts concurrently, collect in order.
+) -> List[Tuple[List[str], str]]:
+    """Dispatch rollout generation for all prompts concurrently, return per-prompt.
 
     Returns:
-        (rollout_texts, rollout_targets) — one entry per usable rollout across
-        all prompts.
+        List of (rollout_texts, true_answer) — one entry per prompt, in input order.
+        Prompts that produced zero usable rollouts have an empty rollout_texts list.
     """
     n = len(prompts)
     ordered: List[Optional[Tuple[List[str], str]]] = [None] * n
@@ -307,11 +307,27 @@ def build_batched_rollout_texts(
                 )
             ordered[idx] = (prompt_rollouts, true_answer)
 
+    return [
+        item if item is not None else ([], true_answers[i])
+        for i, item in enumerate(ordered)
+    ]
+
+
+def build_batched_rollout_texts(
+    prompts: List[str],
+    true_answers: List[str],
+    config: Dict[str, Any],
+) -> Tuple[List[str], List[str]]:
+    """Dispatch rollout generation for all prompts concurrently, collect in order.
+
+    Returns:
+        (rollout_texts, rollout_targets) — one entry per usable rollout across
+        all prompts.
+    """
+    per_prompt = build_rollouts_per_prompt(prompts, true_answers, config)
     rollout_texts: List[str] = []
     rollout_targets: List[str] = []
-    for item in ordered:
-        if item is not None:
-            prompt_rollouts, true_answer = item
-            rollout_texts.extend(prompt_rollouts)
-            rollout_targets.extend([true_answer] * len(prompt_rollouts))
+    for prompt_rollouts, true_answer in per_prompt:
+        rollout_texts.extend(prompt_rollouts)
+        rollout_targets.extend([true_answer] * len(prompt_rollouts))
     return rollout_texts, rollout_targets

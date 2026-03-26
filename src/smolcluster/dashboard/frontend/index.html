@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>smolcluster</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-0: #f9f6ef;
+      --bg-1: #eef4f1;
+      --bg-2: #fff6ea;
+      --ink: #102a28;
+      --ink-soft: #31524f;
+      --accent: #d06a2f;
+      --accent-2: #177e89;
+      --green: #1a9e63;
+      --panel: rgba(255,255,255,0.84);
+      --card: rgba(255,255,255,0.96);
+      --line: rgba(16,42,40,0.1);
+      --shadow: 0 24px 60px rgba(22,41,39,0.14);
+      --radius: 16px;
+    }
+
+    body {
+      font-family: 'Space Grotesk', sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% 10%, rgba(23,126,137,0.12), transparent 60%),
+        radial-gradient(900px 500px at 90% 0%, rgba(208,106,47,0.15), transparent 55%),
+        linear-gradient(150deg, var(--bg-0), var(--bg-1) 50%, var(--bg-2));
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      color: var(--ink);
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 28px;
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+      position: sticky; top: 0; z-index: 10;
+    }
+
+    .logo { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+    .logo span { color: var(--accent-2); }
+
+    .header-stats { display: flex; gap: 20px; font-size: 13px; color: var(--ink-soft); }
+    .stat { display: flex; align-items: center; gap: 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; }
+    .dot.green  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.orange { background: var(--accent); }
+
+    /* ── Main layout ─────────────────────────────────────────────────────── */
+    main {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 0;
+      flex: 1;
+      height: calc(100vh - 53px);
+      overflow: hidden;
+    }
+
+    /* ── Left panel ──────────────────────────────────────────────────────── */
+    .panel-left {
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: rgba(255,255,255,0.3);
+    }
+
+    .panel-title {
+      font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
+      text-transform: uppercase; color: var(--ink-soft);
+      padding: 0 4px 6px; border-bottom: 1px solid var(--line);
+    }
+
+    .node-card {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 14px; padding: 13px 14px;
+      display: flex; flex-direction: column; gap: 7px;
+      animation: slideIn 220ms ease-out;
+      box-shadow: 0 2px 10px rgba(16,42,40,0.05);
+      transition: box-shadow 0.2s;
+    }
+    .node-card:hover { box-shadow: 0 4px 18px rgba(16,42,40,0.1); }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .node-header { display: flex; align-items: center; gap: 9px; }
+    .node-icon { font-size: 24px; line-height: 1; }
+    .node-name { font-size: 14px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
+    .node-meta { font-size: 11px; color: var(--ink-soft); }
+
+    .badge {
+      background: rgba(23,126,137,0.1); color: var(--accent-2);
+      border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 500;
+    }
+    .badge.active { background: rgba(26,158,99,0.12); color: var(--green); }
+    .badge.pending { background: rgba(208,106,47,0.12); color: var(--accent); }
+
+    .connect-btn {
+      align-self: flex-start; padding: 6px 16px; border-radius: 8px;
+      border: 1.5px solid var(--accent-2); background: transparent;
+      color: var(--accent-2); font-family: 'Space Grotesk', sans-serif;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .connect-btn:hover { background: var(--accent-2); color: #fff; }
+    .connect-btn.disconnect { border-color: #c0392b; color: #c0392b; }
+    .connect-btn.disconnect:hover { background: #c0392b; color: #fff; }
+    .connect-btn:disabled { opacity: 0.45; cursor: default; }
+
+    .ssh-row { display: flex; align-items: center; gap: 7px; }
+    input[type="text"] {
+      padding: 5px 9px; border-radius: 7px; border: 1.5px solid var(--line);
+      background: var(--bg-0); font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px; color: var(--ink); width: 112px;
+    }
+    .ssh-label { font-size: 10px; color: var(--ink-soft); }
+
+    .empty-state {
+      text-align: center; color: var(--ink-soft); font-size: 13px;
+      padding: 28px 16px; opacity: 0.7;
+    }
+    .empty-state .big { font-size: 30px; margin-bottom: 6px; }
+
+    /* ── Right panel ─────────────────────────────────────────────────────── */
+    .panel-right {
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    /* ── Topology canvas section ─────────────────────────────────────────── */
+    .topo-section {
+      flex: 1; min-height: 0; position: relative;
+      background: rgba(255,255,255,0.2);
+      border-bottom: 1px solid var(--line);
+    }
+
+    #topo {
+      display: block; width: 100%; height: 100%;
+    }
+
+    .topo-legend {
+      position: absolute; bottom: 12px; right: 16px;
+      display: flex; gap: 14px; font-size: 10px; color: var(--ink-soft);
+      pointer-events: none;
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; }
+    .legend-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+    }
+
+    .topo-algo-label {
+      position: absolute; top: 12px; left: 16px;
+      font-size: 10px; font-weight: 600; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--ink-soft);
+      pointer-events: none;
+    }
+
+    /* ── Inference status bar ────────────────────────────────────────────── */
+    #infer-bar {
+      display: none;
+      padding: 8px 20px; background: rgba(23,126,137,0.08);
+      border-bottom: 1px solid rgba(23,126,137,0.2);
+      font-size: 12px; color: var(--accent-2);
+      display: flex; align-items: center; gap: 10px;
+    }
+    #infer-bar.hidden { display: none !important; }
+    .infer-spinner {
+      width: 14px; height: 14px; border: 2px solid rgba(23,126,137,0.3);
+      border-top-color: var(--accent-2); border-radius: 50%;
+      animation: spin 0.7s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Bottom section ──────────────────────────────────────────────────── */
+    .bottom-section {
+      flex-shrink: 0; padding: 16px 22px; display: flex; flex-direction: column; gap: 14px;
+      overflow-y: auto; max-height: 46vh;
+      background: rgba(255,255,255,0.4);
+    }
+
+    .section-title {
+      font-size: 10px; font-weight: 600; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--ink-soft);
+      margin-bottom: 8px;
+    }
+
+    /* ── Controls ────────────────────────────────────────────────────────── */
+    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+    select {
+      padding: 8px 12px; border-radius: 9px; border: 1.5px solid var(--line);
+      background: var(--card); font-family: 'Space Grotesk', sans-serif;
+      font-size: 13px; color: var(--ink); cursor: pointer; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2331524f' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 11px center; padding-right: 30px;
+    }
+
+    .action-btn {
+      padding: 8px 18px; border-radius: 9px; border: none;
+      font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: opacity 0.15s, transform 0.1s;
+    }
+    .action-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .action-btn:active { transform: translateY(0); }
+    .action-btn:disabled { opacity: 0.38; cursor: default; transform: none; }
+
+    .btn-train { background: var(--green); color: #fff; }
+    .btn-infer { background: var(--accent-2); color: #fff; }
+    .btn-stop  { background: #c0392b; color: #fff; }
+
+    /* ── Metrics ─────────────────────────────────────────────────────────── */
+    .metrics-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px;
+    }
+    .metric-card {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 11px; padding: 12px 14px;
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .metric-label {
+      font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+      text-transform: uppercase; color: var(--ink-soft);
+    }
+    .metric-value {
+      font-size: 24px; font-weight: 700;
+      font-family: 'IBM Plex Mono', monospace; color: var(--ink); line-height: 1.1;
+    }
+    .metric-sub { font-size: 11px; color: var(--ink-soft); }
+
+    .progress-wrap {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 11px; padding: 13px 16px;
+    }
+    .progress-header {
+      display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px;
+    }
+    .progress-bar-bg {
+      background: rgba(16,42,40,0.08); border-radius: 999px; height: 7px; overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent-2), var(--accent));
+      border-radius: 999px; transition: width 0.4s ease;
+    }
+
+    /* ── Scrollbar ───────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(16,42,40,0.12); border-radius: 99px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ───────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">smol<span>cluster</span></div>
+  <div class="header-stats">
+    <div class="stat">
+      <div class="dot green"></div>
+      <span id="lbl-discovered">0 discovered</span>
+    </div>
+    <div class="stat">
+      <div class="dot orange"></div>
+      <span id="lbl-connected">0 in cluster</span>
+    </div>
+  </div>
+</header>
+
+<!-- ── Main ─────────────────────────────────────────────────────────────────── -->
+<main>
+
+  <!-- Left: discovered nodes -->
+  <div class="panel-left">
+    <div class="panel-title">Discovered Nodes</div>
+    <div id="discovered-list">
+      <div class="empty-state">
+        <div class="big">&#x1F4E1;</div>
+        Scanning network&hellip;
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: topology + controls + metrics -->
+  <div class="panel-right">
+
+    <!-- Topology canvas -->
+    <div class="topo-section">
+      <canvas id="topo"></canvas>
+      <div class="topo-algo-label" id="topo-algo-label"></div>
+      <div class="topo-legend" id="topo-legend" style="display:none">
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--green)"></div>
+          gradients ↑
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--accent)"></div>
+          weights ↓
+        </div>
+      </div>
+    </div>
+
+    <!-- Inference status bar -->
+    <div id="infer-bar" class="hidden">
+      <div class="infer-spinner" id="infer-spinner"></div>
+      <span id="infer-msg">Checking connectivity…</span>
+    </div>
+
+    <!-- Bottom: controls + metrics -->
+    <div class="bottom-section">
+
+      <!-- Controls -->
+      <div>
+        <div class="section-title">Cluster Controls</div>
+        <div class="controls">
+          <select id="algo-select">
+            <option value="syncps">SyncPS — Sync Parameter Server</option>
+            <option value="edp">EDP — Elastic Data Parallelism</option>
+            <option value="mp">MP — Model Parallelism</option>
+            <option value="mp_pipeline">MP Pipeline</option>
+            <option value="classicdp">Classic Data Parallelism</option>
+            <option value="fsdp">FSDP — Fully Sharded</option>
+            <option value="ep">EP — Expert Parallelism</option>
+          </select>
+          <button class="action-btn btn-train" id="btn-train" onclick="startTraining()">
+            &#9654; Train
+          </button>
+          <button class="action-btn btn-infer" id="btn-infer" onclick="startInference()">
+            &#128268; Test Connectivity
+          </button>
+          <button class="action-btn btn-stop" id="btn-stop" onclick="stopAll()" disabled>
+            &#9632; Stop
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress bar (training only) -->
+      <div id="progress-section" style="display:none">
+        <div class="progress-wrap">
+          <div class="progress-header">
+            <span id="prog-label">Step 0</span>
+            <span id="prog-pct">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="prog-bar" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Training metrics -->
+      <div id="metrics-section" style="display:none">
+        <div class="section-title">Live Metrics</div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">Loss</div>
+            <div class="metric-value" id="m-loss">—</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Throughput</div>
+            <div class="metric-value" id="m-tput">—</div>
+            <div class="metric-sub">tokens / sec</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Step</div>
+            <div class="metric-value" id="m-step">—</div>
+            <div class="metric-sub" id="m-step-sub"></div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Algorithm</div>
+            <div class="metric-value" id="m-algo" style="font-size:15px">—</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</main>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let state = {
+  discovered: {}, selected: {}, running: {}, usernames: {},
+  training: {}, inference: {}
+};
+const sshOverrides = {};
+let _prevNodesSig = '', _prevTrainSig = '', _prevInferSig = '';
+
+// ── SSE ────────────────────────────────────────────────────────────────────────
+function startSSE() {
+  const es = new EventSource('/api/events');
+  es.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    state.discovered = data.nodes.discovered || {};
+    state.selected   = data.nodes.selected   || {};
+    state.running    = data.nodes.running    || {};
+    state.usernames  = data.nodes.usernames  || {};
+    state.training   = data.training         || {};
+    state.inference  = data.inference        || {};
+
+    const nodesSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames]);
+    const trainSig = JSON.stringify(state.training);
+    const inferSig = JSON.stringify(state.inference);
+
+    if (nodesSig !== _prevNodesSig) {
+      renderHeader(); renderDiscovered(); updateButtons();
+      _prevNodesSig = nodesSig;
+    }
+    if (trainSig !== _prevTrainSig) {
+      renderTraining(); updateButtons();
+      _prevTrainSig = trainSig;
+    }
+    if (inferSig !== _prevInferSig) {
+      renderInference();
+      _prevInferSig = inferSig;
+    }
+  };
+  es.onerror = () => { es.close(); setTimeout(startSSE, 3000); };
+}
+
+// ── Header ─────────────────────────────────────────────────────────────────────
+function renderHeader() {
+  setText('lbl-discovered', `${Object.keys(state.discovered).length} discovered`);
+  const nSel = Object.keys(state.selected).length + Object.keys(state.running).length;
+  setText('lbl-connected', `${nSel} in cluster`);
+}
+
+// ── Discovered panel (diff, no flicker) ────────────────────────────────────────
+function renderDiscovered() {
+  const list  = document.getElementById('discovered-list');
+  const nodes = state.discovered;
+  const keys  = Object.keys(nodes);
+
+  if (keys.length === 0) {
+    if (!list.querySelector('.empty-state'))
+      list.innerHTML = '<div class="empty-state"><div class="big">&#x1F4E1;</div>Scanning…</div>';
+    return;
+  }
+  list.querySelector('.empty-state')?.remove();
+
+  list.querySelectorAll('.node-card[data-hostname]').forEach(card => {
+    if (!nodes[card.dataset.hostname]) card.remove();
+  });
+
+  keys.forEach(hostname => {
+    let card = list.querySelector(`.node-card[data-hostname="${CSS.escape(hostname)}"]`);
+    if (!card) { card = buildCard(hostname, nodes[hostname]); list.appendChild(card); }
+    syncCard(card, hostname, nodes[hostname]);
+  });
+}
+
+function buildCard(hostname, n) {
+  const card = document.createElement('div');
+  card.className = 'node-card';
+  card.dataset.hostname = hostname;
+  card.innerHTML = `
+    <div class="node-header">
+      <div class="node-icon">${nodeIcon(n)}</div>
+      <div>
+        <div class="node-name">${hostname}.local</div>
+        <div class="node-meta node-os">${[n.os, n.os_version, n.machine].filter(Boolean).join(' · ') || 'macOS'}</div>
+      </div>
+    </div>
+    <div class="card-badges"></div>
+    <div class="ssh-row">
+      <span class="ssh-label">SSH user:</span>
+      <input type="text" class="ssh-input" placeholder="detecting…">
+    </div>
+    <button class="connect-btn card-btn">Add to Cluster</button>
+  `;
+  card.querySelector('.ssh-input').addEventListener('input', function() {
+    sshOverrides[hostname] = this.value.trim();
+  });
+  card.querySelector('.card-btn').addEventListener('click', () => {
+    if (hostname in state.selected || hostname in state.running)
+      removeFromCluster(hostname);
+    else
+      addToCluster(hostname, card);
+  });
+  return card;
+}
+
+function syncCard(card, hostname, n) {
+  const isSelected = hostname in state.selected;
+  const isRunning  = hostname in state.running;
+
+  // Fill username once
+  const input  = card.querySelector('.ssh-input');
+  const probed = state.usernames[hostname];
+  if (probed && !sshOverrides[hostname] && input.value !== probed) {
+    input.value = probed; input.placeholder = probed;
+  } else if (probed === null || probed === undefined) {
+    input.placeholder = 'detecting…';
+  } else if (probed === '') {
+    input.placeholder = getGuessUser(hostname) || 'username';
+  }
+
+  // Badge
+  const badges = card.querySelector('.card-badges');
+  if (isRunning) {
+    const algo = state.running[hostname]?.algorithm || '';
+    const label = algo === 'infer' ? '⚡ testing' : '● training';
+    badges.innerHTML = `<span class="badge active">${label}</span>`;
+  } else if (isSelected) {
+    badges.innerHTML = `<span class="badge pending">✓ in cluster</span>`;
+  } else {
+    badges.innerHTML = `<span class="badge">available</span>`;
+  }
+
+  // Button
+  const btn = card.querySelector('.card-btn');
+  if (!btn.disabled) {
+    const inCluster = isSelected || isRunning;
+    btn.textContent = inCluster ? 'Remove' : 'Add to Cluster';
+    btn.className = `connect-btn${inCluster ? ' disconnect' : ''} card-btn`;
+  }
+}
+
+// ── Inference status bar ────────────────────────────────────────────────────────
+function renderInference() {
+  const bar = document.getElementById('infer-bar');
+  const inf = state.inference;
+
+  const inferRunning = Object.values(state.running).some(r => r.algorithm === 'infer');
+
+  if (!inferRunning || !inf || !inf.mode) {
+    bar.classList.add('hidden');
+    return;
+  }
+
+  bar.classList.remove('hidden');
+  setText('infer-msg', inf.message || 'Checking connectivity…');
+
+  const spinner = document.getElementById('infer-spinner');
+  const done = inf.status === 'ready' || inf.status === 'partial';
+  spinner.style.display = done ? 'none' : '';
+}
+
+// ── Training metrics ────────────────────────────────────────────────────────────
+function renderTraining() {
+  const t = state.training;
+  const has = t && (t.step !== undefined || t.loss !== undefined);
+  document.getElementById('metrics-section').style.display = has ? '' : 'none';
+  document.getElementById('progress-section').style.display = (has && t.total_steps) ? '' : 'none';
+  if (!has) return;
+
+  setText('m-loss', t.loss        != null ? Number(t.loss).toFixed(4) : '—');
+  setText('m-tput', t.throughput  != null ? Math.round(t.throughput)  : '—');
+  setText('m-step', t.step        != null ? t.step.toLocaleString()    : '—');
+  setText('m-algo', t.algorithm   || document.getElementById('algo-select').value);
+  setText('m-step-sub', t.total_steps ? `of ${t.total_steps.toLocaleString()}` : '');
+
+  if (t.step != null && t.total_steps) {
+    const pct = Math.min(100, Math.round(t.step / t.total_steps * 100));
+    document.getElementById('prog-bar').style.width = pct + '%';
+    setText('prog-label', `Step ${t.step.toLocaleString()} / ${t.total_steps.toLocaleString()}`);
+    setText('prog-pct', pct + '%');
+  }
+}
+
+function updateButtons() {
+  const isRunning = Object.keys(state.running).length > 0;
+  const hasSel    = Object.keys(state.selected).length > 0;
+  document.getElementById('btn-train').disabled = isRunning || !hasSel;
+  document.getElementById('btn-infer').disabled = isRunning || !hasSel;
+  document.getElementById('btn-stop').disabled  = !isRunning;
+}
+
+// ── Actions ─────────────────────────────────────────────────────────────────────
+async function addToCluster(hostname, card) {
+  const btn  = card.querySelector('.card-btn');
+  const user = sshOverrides[hostname] || state.usernames[hostname] || getGuessUser(hostname) || '';
+  btn.disabled = true; btn.textContent = 'Adding…';
+  const res = await fetch(`/api/nodes/${hostname}/select`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ssh_user: user }),
+  });
+  btn.disabled = false;
+  if (!res.ok) { const e = await res.json(); alert(`Error: ${e.detail}`); }
+}
+
+async function removeFromCluster(hostname) {
+  await fetch(`/api/nodes/${hostname}/deselect`, { method: 'POST' });
+}
+
+async function startTraining() {
+  if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
+  const res = await fetch('/api/training/start', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ algorithm: document.getElementById('algo-select').value }),
+  });
+  if (!res.ok) { const e = await res.json(); alert(`Start failed: ${e.detail}`); }
+}
+
+async function startInference() {
+  if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
+  const res = await fetch('/api/inference/start', { method: 'POST' });
+  if (!res.ok) { const e = await res.json(); alert(`Inference failed: ${e.detail}`); }
+}
+
+async function stopAll() {
+  await fetch('/api/training/stop',  { method: 'POST' });
+  await fetch('/api/inference/stop', { method: 'POST' });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────────
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el && el.textContent !== String(val)) el.textContent = val;
+}
+
+function getGuessUser(hostname) {
+  const m = hostname.match(/macmini(\d+)/i);
+  return m ? `yuvrajsingh${m[1]}` : '';
+}
+
+function nodeIcon(n) {
+  const os   = (n.os   || '').toLowerCase();
+  const host = (n.hostname || '').toLowerCase();
+  if (host.includes('ipad'))               return '&#x1F4F1;';
+  if (host.includes('pi') || host.includes('rasp')) return '&#x1F353;';
+  if (host.includes('win'))                return '&#x1F5A5;';
+  if (os === 'darwin' || host.includes('mac')) return '&#x1F4BB;';
+  if (os === 'linux')                      return '&#x1F427;';
+  return '&#x1F4BB;';
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ── Topology Canvas ──────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+
+const canvas = document.getElementById('topo');
+const ctx    = canvas.getContext('2d');
+let particles = [];
+let lastSpawn = 0;
+const DPR = window.devicePixelRatio || 1;
+
+// Resize canvas to match its CSS size
+function resizeCanvas() {
+  const w = canvas.offsetWidth;
+  const h = canvas.offsetHeight;
+  if (canvas.width !== w * DPR || canvas.height !== h * DPR) {
+    canvas.width  = w * DPR;
+    canvas.height = h * DPR;
+    ctx.scale(DPR, DPR);
+  }
+}
+new ResizeObserver(resizeCanvas).observe(canvas);
+
+// Build the layout from state
+function getTopoLayout() {
+  const W = canvas.width  / DPR;
+  const H = canvas.height / DPR;
+
+  // Merge selected + running; running takes priority
+  const all = {};
+  for (const [h, v] of Object.entries(state.selected))
+    all[h] = { ...v, active: false };
+  for (const [h, v] of Object.entries(state.running))
+    all[h] = { ...v, active: v.status === 'running' || true };
+
+  let server = null;
+  const workers = [];
+  for (const [hostname, info] of Object.entries(all)) {
+    if (info.rank === 0 || info.role === 'server') server = { hostname, ...info };
+    else workers.push({ hostname, ...info });
+  }
+  workers.sort((a, b) => a.rank - b.rank);
+
+  // Determine topology type from selected algorithm
+  const algo = document.getElementById('algo-select').value;
+  const hasServer = !['classicdp', 'fsdp', 'ep', 'mp_pipeline'].includes(algo);
+
+  const serverX = W / 2, serverY = H * 0.20;
+  const workerY = H * 0.72;
+  const nw = workers.length;
+  const maxSpacing = Math.min(160, nw > 1 ? (W - 120) / (nw - 1) : 0);
+  const startX = W / 2 - (nw - 1) * maxSpacing / 2;
+
+  const workerNodes = workers.map((w, i) => ({
+    ...w, x: startX + i * maxSpacing, y: workerY,
+  }));
+
+  return { W, H, server: server ? { ...server, x: serverX, y: serverY } : null,
+           workers: workerNodes, hasServer };
+}
+
+// Quadratic bezier point
+function bezierPt(t, x0, y0, cpx, cpy, x1, y1) {
+  const mt = 1 - t;
+  return { x: mt*mt*x0 + 2*mt*t*cpx + t*t*x1, y: mt*mt*y0 + 2*mt*t*cpy + t*t*y1 };
+}
+
+// Draw one connection line (two offset bezier curves for up/down lanes)
+function drawConnection(x0, y0, x1, y1, active) {
+  const cpx = (x0 + x1) / 2;
+  const cpy = (y0 + y1) / 2;
+  const offset = 18;
+
+  // Up lane (worker→server)
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.quadraticCurveTo(cpx - offset, cpy, x1, y1);
+  ctx.strokeStyle = active ? 'rgba(26,158,99,0.45)' : 'rgba(16,42,40,0.1)';
+  ctx.lineWidth = active ? 1.5 : 1;
+  ctx.stroke();
+
+  // Down lane (server→worker)
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.quadraticCurveTo(cpx + offset, cpy, x1, y1);
+  ctx.strokeStyle = active ? 'rgba(208,106,47,0.38)' : 'rgba(16,42,40,0.07)';
+  ctx.lineWidth = active ? 1.2 : 0.8;
+  ctx.stroke();
+}
+
+// Draw a node circle
+function drawNode(x, y, label, sublabel, isServer, isActive, inferStatus) {
+  const r  = 34;
+  const fc = isServer ? 'rgba(208,106,47,0.13)' : 'rgba(23,126,137,0.1)';
+  const sc = isServer ? '#d06a2f' : '#177e89';
+
+  // Glow pulse when active
+  if (isActive) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 400);
+    ctx.beginPath();
+    ctx.arc(x, y, r + 10, 0, Math.PI * 2);
+    const g = ctx.createRadialGradient(x, y, r, x, y, r + 10);
+    const alpha = (0.12 + 0.1 * pulse).toFixed(2);
+    g.addColorStop(0, isServer ? `rgba(208,106,47,${alpha})` : `rgba(23,126,137,${alpha})`);
+    g.addColorStop(1, 'transparent');
+    ctx.fillStyle = g;
+    ctx.fill();
+  }
+
+  // Fill + stroke
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fc;
+  ctx.fill();
+  ctx.strokeStyle = sc;
+  ctx.lineWidth = isActive ? 2 : 1.5;
+  ctx.stroke();
+
+  // Inference status badge (top-right)
+  if (inferStatus !== undefined) {
+    const bx = x + r * 0.72, by = y - r * 0.72;
+    ctx.beginPath();
+    ctx.arc(bx, by, 7, 0, Math.PI * 2);
+    ctx.fillStyle = inferStatus === 'ok' ? '#1a9e63' : inferStatus === 'wait' ? '#f39c12' : '#ccc';
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(inferStatus === 'ok' ? '✓' : '…', bx, by);
+  }
+
+  // Text
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = sc;
+  ctx.font = `700 11px 'IBM Plex Mono', monospace`;
+  ctx.fillText(label, x, y - 7);
+
+  const short = sublabel.length > 10 ? sublabel.slice(0, 9) + '…' : sublabel;
+  ctx.fillStyle = '#31524f';
+  ctx.font = `500 9.5px 'IBM Plex Mono', monospace`;
+  ctx.fillText(short, x, y + 8);
+}
+
+// Main draw loop
+function drawFrame(ts) {
+  resizeCanvas();
+  const { W, H, server, workers } = getTopoLayout();
+  ctx.clearRect(0, 0, W, H);
+
+  const isTraining = Object.values(state.running).some(r => r.algorithm !== 'infer');
+  const isInferring = Object.values(state.running).some(r => r.algorithm === 'infer');
+  const isActive = isTraining || isInferring;
+
+  // Update algo label
+  const algoLabel = document.getElementById('topo-algo-label');
+  if (isActive) {
+    const firstAlgo = Object.values(state.running)[0]?.algorithm || '';
+    algoLabel.textContent = firstAlgo === 'infer' ? 'CONNECTIVITY TEST' : firstAlgo.toUpperCase() + ' TOPOLOGY';
+  } else {
+    algoLabel.textContent = Object.keys(state.selected).length + Object.keys(state.running).length > 0
+      ? document.getElementById('algo-select').value.toUpperCase() + ' TOPOLOGY' : '';
+  }
+
+  // Legend
+  document.getElementById('topo-legend').style.display = isTraining ? '' : 'none';
+
+  // Empty state
+  if (!server && workers.length === 0) {
+    ctx.fillStyle = 'rgba(16,42,40,0.22)';
+    ctx.font = `14px 'Space Grotesk', sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Add nodes from the left panel to build your cluster', W/2, H/2);
+    requestAnimationFrame(drawFrame);
+    return;
+  }
+
+  // Lines
+  if (server) {
+    workers.forEach(w => {
+      const wActive = isActive && (w.hostname in state.running);
+      drawConnection(server.x, server.y, w.x, w.y, wActive);
+    });
+  } else if (workers.length >= 2) {
+    // All-to-all / ring for server-less algos
+    for (let i = 0; i < workers.length; i++) {
+      for (let j = i + 1; j < workers.length; j++) {
+        const bothActive = isActive && (workers[i].hostname in state.running) && (workers[j].hostname in state.running);
+        const a = workers[i], b = workers[j];
+        drawConnection(a.x, a.y, b.x, b.y, bothActive);
+      }
+    }
+  }
+
+  // Spawn particles
+  if (isActive && ts - lastSpawn > 350) {
+    const connections = server
+      ? workers.filter(w => w.hostname in state.running).map(w => ({ srv: server, wkr: w }))
+      : [];
+
+    connections.forEach(({ srv, wkr }) => {
+      // Gradient up: worker → server
+      particles.push({
+        sx: wkr.x, sy: wkr.y, ex: srv.x, ey: srv.y,
+        cpOff: -18, t: 0, speed: 0.008 + Math.random() * 0.004,
+        color: '26,158,99', size: 3.8,
+      });
+      // Weights down: server → worker (offset start)
+      particles.push({
+        sx: srv.x, sy: srv.y, ex: wkr.x, ey: wkr.y,
+        cpOff: +18, t: 0.25 + Math.random() * 0.1, speed: 0.007 + Math.random() * 0.004,
+        color: '208,106,47', size: 3.2,
+      });
+    });
+    lastSpawn = ts;
+  }
+
+  // Update + draw particles
+  particles = particles.filter(p => {
+    p.t += p.speed;
+    return p.t < 1;
+  });
+
+  particles.forEach(p => {
+    const cpx = (p.sx + p.ex) / 2 + p.cpOff;
+    const cpy = (p.sy + p.ey) / 2;
+    const { x, y } = bezierPt(p.t, p.sx, p.sy, cpx, cpy, p.ex, p.ey);
+    const fade = Math.min(1, Math.sin(p.t * Math.PI) * 1.4);
+    ctx.beginPath();
+    ctx.arc(x, y, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${p.color},${fade.toFixed(2)})`;
+    ctx.fill();
+  });
+
+  // Build inference connected set
+  const inferConnected = new Set((state.inference?.workers || []).map(w => w.hostname));
+
+  // Draw nodes
+  if (server) {
+    const serverRunning = server.hostname in state.running;
+    let inferStatus;
+    if (isInferring) inferStatus = serverRunning ? 'ok' : 'wait';
+    drawNode(server.x, server.y, 'SERVER', server.hostname, true, serverRunning, inferStatus);
+  }
+
+  workers.forEach(w => {
+    const wRunning = w.hostname in state.running;
+    let inferStatus;
+    if (isInferring) inferStatus = inferConnected.has(w.hostname) ? 'ok' : 'wait';
+    drawNode(w.x, w.y, `RANK ${w.rank}`, w.hostname, false, wRunning, inferStatus);
+  });
+
+  requestAnimationFrame(drawFrame);
+}
+
+// Boot
+requestAnimationFrame(drawFrame);
+startSSE();
+</script>
+</body>
+</html>

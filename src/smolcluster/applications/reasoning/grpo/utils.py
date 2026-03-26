@@ -182,3 +182,69 @@ def load_model(
         logger.info("Skipping reference model load (use_kl=false)")
 
     return model, ref_model, tokenizer
+
+
+# ---------------------------------------------------------------------------
+# LoRA adapter application
+# ---------------------------------------------------------------------------
+
+def apply_lora_if_quantized(model: Any, config: Dict[str, Any]) -> bool:
+    """Wrap quantized linear layers with bfloat16 LoRA adapters.
+
+    If the model contains uint32 parameters (4-bit packed weights), freezes the
+    base model and wraps transformer linear layers with trainable bfloat16 LoRA
+    adapters. Returns True if LoRA was applied, False for non-quantized models.
+    """
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    flat = tree_flatten(model.parameters())
+    dtypes: Dict[str, int] = {}
+    for _, v in flat:
+        key = str(v.dtype)
+        dtypes[key] = dtypes.get(key, 0) + 1
+
+    has_quantized = mx.uint32 in {v.dtype for _, v in flat}
+
+    sep = "=" * 60
+    logger.info(sep)
+    logger.info("[MODEL] Weight dtype distribution:")
+    for dtype_name, count in sorted(dtypes.items()):
+        logger.info("  %s: %d tensors", dtype_name, count)
+
+    if not has_quantized:
+        all_params = tree_flatten(model.parameters())
+        n_total = sum(v.size for _, v in all_params)
+        logger.info("[LORA] NOT applied — no uint32 (4-bit quantized) weights detected")
+        logger.info("[LORA] All %d parameters are trainable (%.1f M)", n_total, n_total / 1e6)
+        logger.info(sep)
+        return False
+
+    rank = int(config.get("lora_rank", 8))
+    scale = float(config.get("lora_scale", 20.0))
+    lora_cfg = {
+        "rank": rank,
+        "alpha": scale * rank,
+        "dropout": float(config.get("lora_dropout", 0.0)),
+        "scale": scale,
+    }
+    num_layers = int(config.get("lora_num_layers", -1))
+
+    logger.info("[LORA] uint32 weights detected — applying LoRA adapters")
+    logger.info("[LORA] Config: rank=%d  scale=%.1f  dropout=%.1f  layers=%s",
+                rank, scale, lora_cfg["dropout"], "all" if num_layers == -1 else num_layers)
+    logger.info("[LORA] Freezing base model weights ...")
+
+    model.freeze()
+    linear_to_lora_layers(model, num_layers, lora_cfg)
+
+    trainable = tree_flatten(model.trainable_parameters())
+    n_trainable = sum(v.size for _, v in trainable)
+    all_params = tree_flatten(model.parameters())
+    n_total = sum(v.size for _, v in all_params)
+
+    logger.info("[LORA] ACTIVE — %d trainable params (%.1f M) out of %.1f M total (%.1f%% of model)",
+                n_trainable, n_trainable / 1e6, n_total / 1e6,
+                100.0 * n_trainable / n_total)
+    logger.info("[LORA] Base 4-bit backbone frozen; only lora_a / lora_b will update")
+    logger.info(sep)
+    return True

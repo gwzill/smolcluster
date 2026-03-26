@@ -66,7 +66,16 @@ _DEFAULT_VLLM_START_CMD = (
 
 def save_policy_weights(model: Any, checkpoint_dir: str, step: int) -> Path:
     """
-    Flatten the policy model parameters and write them as a safetensors file.
+    Save policy weights (or LoRA adapters for quantized models) as safetensors.
+
+    For quantized models with LoRA adapters (detected via the presence of a
+    ``fuse`` method on any module), saves only the trainable adapter weights
+    plus an ``adapter_config.json`` to ``step_dir/adapters/``.  Workers then
+    load the unchanged 4-bit base model and overlay the adapters via
+    ``--adapter-path``.
+
+    For non-quantized models, saves the full ``model.safetensors`` (existing
+    behaviour).
 
     Args:
         model:          The MLX policy model (not the reference model).
@@ -77,15 +86,42 @@ def save_policy_weights(model: Any, checkpoint_dir: str, step: int) -> Path:
         The step-level directory that was written, e.g.
         ``<project_root>/checkpoints/grpo/step_10/``.
     """
+    import json
+
     step_dir = _project_root / checkpoint_dir / f"step_{step}"
     step_dir.mkdir(parents=True, exist_ok=True)
-    weights_path = step_dir / "model.safetensors"
 
+    lora_modules = [(n, m) for n, m in model.named_modules() if hasattr(m, "fuse")]
+    if lora_modules:
+        # Save only LoRA adapter weights — workers keep the original 4-bit base model
+        adapter_dir = step_dir / "adapters"
+        adapter_dir.mkdir(exist_ok=True)
+        adapter_weights = dict(tree_flatten(model.trainable_parameters()))
+        mx.eval(list(adapter_weights.values()))
+        mx.save_safetensors(str(adapter_dir / "adapters.safetensors"), adapter_weights)
+
+        # Write adapter_config.json — infer rank and scale from the first LoRA module
+        _, first_lora = lora_modules[0]
+        rank = int(first_lora.lora_a.shape[0])
+        scale = float(first_lora.scale)
+        adapter_cfg = {
+            "lora_parameters": {
+                "rank": rank,
+                "alpha": scale * rank,
+                "dropout": 0.0,
+                "scale": scale,
+            }
+        }
+        (adapter_dir / "adapter_config.json").write_text(json.dumps(adapter_cfg, indent=2))
+        logger.info("[weight_sync] Step %d — LoRA adapters saved to %s", step, adapter_dir)
+        return step_dir
+
+    # Non-quantized model: full weight save (existing behaviour)
+    weights_path = step_dir / "model.safetensors"
     flat_weights = dict(tree_flatten(model.parameters()))
     # Force evaluation so all pending MLX operations complete before we write.
     mx.eval(list(flat_weights.values()))
     mx.save_safetensors(str(weights_path), flat_weights)
-
     logger.info("[weight_sync] Step %d — weights saved to %s", step, weights_path)
     return step_dir
 
@@ -262,12 +298,25 @@ def _sync_single_worker(
     vllm_activate = sync_cfg.get("vllm_activate", "~/.venv-vllm-metal/bin/activate")
     vllm_activate = _resolve_remote_path(hostname, vllm_activate)
 
+    # Detect LoRA mode: adapters were saved instead of a full weights file
+    adapter_dir = local_weights_dir / "adapters"
+    is_lora = adapter_dir.exists() and (adapter_dir / "adapters.safetensors").exists()
+    remote_adapter_dir = remote_model_dir + "_adapters"
+
     vllm_start_cmd = sync_cfg.get("vllm_start_cmd", _DEFAULT_VLLM_START_CMD).format(
         model_dir=remote_model_dir,
         port=port,
         rank=rank,
         vllm_activate=vllm_activate,
     )
+    if is_lora:
+        # Inject --adapter-path before the output redirect so it lands inside
+        # the bash -c string regardless of the template shape.
+        adapter_flag = f"--adapter-path {shlex.quote(remote_adapter_dir)}"
+        if "2>&1" in vllm_start_cmd:
+            vllm_start_cmd = vllm_start_cmd.replace("2>&1", f"{adapter_flag} 2>&1", 1)
+        else:
+            vllm_start_cmd += f" {adapter_flag}"
 
     local_weights_file = local_weights_dir / "model.safetensors"
     remote_weights_path = f"{remote_model_dir}/{remote_weights_filename}"
@@ -285,9 +334,15 @@ def _sync_single_worker(
         logger.info("[weight_sync] worker %d (%s): syncing model files ...", rank, hostname)
         _scp_model_files(hostname, local_model_dir, remote_model_dir)
 
-    # 3. Copy the updated weights file to the worker.
-    _scp_file(local_weights_file, hostname, remote_weights_path)
-    logger.info("[weight_sync] worker %d (%s): weights uploaded", rank, hostname)
+    # 3. Copy weights or LoRA adapters to the worker.
+    if is_lora:
+        _run_ssh(hostname, f"mkdir -p {shlex.quote(remote_adapter_dir)}")
+        for fname in ["adapters.safetensors", "adapter_config.json"]:
+            _scp_file(adapter_dir / fname, hostname, f"{remote_adapter_dir}/{fname}")
+        logger.info("[weight_sync] worker %d (%s): LoRA adapters uploaded", rank, hostname)
+    else:
+        _scp_file(local_weights_file, hostname, remote_weights_path)
+        logger.info("[weight_sync] worker %d (%s): weights uploaded", rank, hostname)
 
     # 4. Kill the running vLLM tmux session and any stale process on the worker.
     kill_result = _run_ssh(

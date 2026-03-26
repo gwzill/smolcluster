@@ -1,4 +1,5 @@
 import gc
+import json
 import logging
 import math
 import socket
@@ -437,6 +438,20 @@ def run_syncps_server(
                     "throughput/server_tok_per_sec": tok_per_sec,
                 }
             )
+
+            # Write live metrics for the dashboard
+            try:
+                _metrics = {
+                    "step": step,
+                    "total_steps": num_epochs * len(train_loader),
+                    "loss": round(total_loss / (batch_idx + 1), 4),
+                    "throughput": round(tok_per_sec, 1),
+                    "algorithm": "syncps",
+                    "running": True,
+                }
+                Path("/tmp/smolcluster_metrics.json").write_text(json.dumps(_metrics))
+            except Exception:
+                pass
 
             # Update progress bar
             batch_pbar.set_postfix({"lr": f"{optimizer.param_groups[0]['lr']:.2e}", "step": step, "tok/s": f"{tok_per_sec:.0f}"})
