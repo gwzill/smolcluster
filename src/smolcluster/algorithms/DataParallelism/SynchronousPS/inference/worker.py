@@ -168,69 +168,7 @@ def main() -> None:
                 ),
             )
         
-        elif command == "generate_stream":
-            # Legacy: Generate and stream tokens independently (no averaging)
-            logger.info(f"Generating independent response for worker {WORKER_RANK}")
-            
-            input_ids = payload["input_ids"].to(device)
-            max_new_tokens = payload.get("max_new_tokens", 128)
-            decoding_strategy = payload.get("decoding_strategy", "greedy")
-            temperature = payload.get("temperature", 1.0)
-            top_p = payload.get("top_p", 0.9)
-            top_k = payload.get("top_k", 50)
-            tokenizer_config = payload.get("tokenizer_config", {})
-            eos_token_id = tokenizer_config.get("eos_token_id", tokenizer.eos_token_id if tokenizer else None)
-            
-            generated_token_ids = []
-            
-            # Generate tokens one by one
-            for token_idx in range(max_new_tokens):
-                with torch.inference_mode():
-                    logits = model(input_ids).logits
-                
-                # Sample next token
-                input_ids, should_stop = sample_next_token(
-                    logits,
-                    input_ids,
-                    temperature,
-                    tokenizer,
-                    decoding_strategy=decoding_strategy,
-                    top_p=top_p,
-                    top_k=top_k,
-                )
-                
-                new_token_id = input_ids[0, -1].item()
-                generated_token_ids.append(new_token_id)
-
-                send_message(
-                    sock,
-                    (
-                        "token",
-                        {
-                            "worker_rank": WORKER_RANK,
-                            "token_id": new_token_id,
-                            "token_idx": token_idx,
-                        },
-                    ),
-                )
-                
-                # Check if we should stop
-                if should_stop or (eos_token_id and new_token_id == eos_token_id):
-                    break
-            
-            logger.info(f"Worker {WORKER_RANK} generated {len(generated_token_ids)} tokens")
-
-            send_message(
-                sock,
-                (
-                    "stream_complete",
-                    {
-                        "worker_rank": WORKER_RANK,
-                        "num_tokens": len(generated_token_ids),
-                    },
-                ),
-            )
-        
+     
         else:
             logger.warning(f"Unknown command: {command}")
             continue

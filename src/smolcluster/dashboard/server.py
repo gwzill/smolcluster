@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import socket
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -81,6 +82,28 @@ def parse_ssh_config() -> dict:
 _SSH_CONFIG:  dict = parse_ssh_config()   # ip/hostname → {alias, user}
 _ssh_aliases: dict = {}                   # mDNS hostname → SSH alias e.g. "mini2"
 
+
+def _get_local_ip() -> str:
+    """Best-effort: get this machine's LAN IP."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def _get_server_alias(server_hostname: str) -> str:
+    """Return the SSH config alias for the local server, or the hostname itself."""
+    local_ip = _get_local_ip()
+    if local_ip and local_ip in _SSH_CONFIG:
+        return _SSH_CONFIG[local_ip]["alias"]
+    if server_hostname in _SSH_CONFIG:
+        return _SSH_CONFIG[server_hostname]["alias"]
+    return server_hostname
+
 # ── App state ─────────────────────────────────────────────────────────────────
 discovery:        NodeDiscovery
 node_manager:     NodeManager
@@ -111,7 +134,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 
 
 # ── Auto-probe usernames ───────────────────────────────────────────────────────
-_probed: dict = {}
+_probed:   dict = {}  # hostname → SSH username
+_node_os:  dict = {}  # hostname → {os, os_version, machine}
 
 def _on_node_change():
     for hostname, info in discovery.snapshot().items():
@@ -131,17 +155,53 @@ async def _probe_and_store(hostname: str, info: dict):
         _ssh_aliases[hostname] = ssh_entry["alias"]
         _probed[hostname] = ssh_entry.get("user", "")
         logger.info(f"[dashboard] {hostname} → SSH alias '{ssh_entry['alias']}' from ~/.ssh/config")
-        return
+        target = ssh_entry["alias"]
+    else:
+        # 2. Fall back to SSH probe (whoami)
+        m = re.search(r'macmini(\d+)', hostname, re.IGNORECASE)
+        guess = f"yuvrajsingh{m[1]}" if m else ""
+        target = None
+        for attempt in ([guess] if guess else []) + [""]:
+            user = await NodeManager.probe_username(hostname, attempt)
+            if user:
+                _probed[hostname] = user
+                target = _build_ssh_target(attempt, hostname)
+                break
+        if _probed.get(hostname) is None:
+            _probed[hostname] = ""
 
-    # 2. Fall back to SSH probe (whoami)
-    m = re.search(r'macmini(\d+)', hostname, re.IGNORECASE)
-    guess = f"yuvrajsingh{m[1]}" if m else ""
-    for attempt in ([guess] if guess else []) + [""]:
-        user = await NodeManager.probe_username(hostname, attempt)
-        if user:
-            _probed[hostname] = user
-            return
-    _probed[hostname] = ""
+    # 3. Probe OS info via SSH — await directly so it's ready before next SSE tick
+    if target and hostname not in _node_os:
+        await _probe_os(hostname, target)
+
+
+async def _probe_os(hostname: str, target: str) -> None:
+    """SSH-probe OS info: uname -srm + sw_vers -productVersion (macOS)."""
+    cmd = ["ssh", "-o", "StrictHostKeyChecking=no",
+           "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+           target,
+           "uname -s; uname -r; uname -m; sw_vers -productVersion 2>/dev/null || true"]
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True),
+            timeout=12.0,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            os_name    = lines[0] if len(lines) > 0 else ""
+            kernel_ver = lines[1] if len(lines) > 1 else ""
+            machine    = lines[2] if len(lines) > 2 else ""
+            # sw_vers gives the human macOS version (e.g. "15.4.1"); prefer it
+            os_version = lines[3] if len(lines) > 3 else kernel_ver
+            if os_name:
+                _node_os[hostname] = {
+                    "os": os_name, "os_version": os_version, "machine": machine,
+                }
+                logger.info(f"[dashboard] {hostname} OS: {os_name} {os_version} {machine}")
+        else:
+            logger.warning(f"[dashboard] OS probe {hostname}: rc={result.returncode} stderr={result.stderr[:80]}")
+    except Exception as e:
+        logger.warning(f"[dashboard] OS probe {hostname}: {e}")
 
 
 # ── Request models ─────────────────────────────────────────────────────────────
@@ -151,6 +211,10 @@ class SelectRequest(BaseModel):
 
 class StartRequest(BaseModel):
     algorithm: str = "syncps"
+
+class InferenceLaunchRequest(BaseModel):
+    algorithm: str = "syncps"
+    server_hostname: str = ""   # which selected node is the server/rank-0
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -167,6 +231,7 @@ async def get_nodes():
         "running":     node_manager.snapshot_processes(),
         "usernames":   dict(_probed),
         "ssh_aliases": dict(_ssh_aliases),
+        "node_os":     dict(_node_os),
     }
 
 
@@ -224,6 +289,64 @@ async def stop_inference():
     await node_manager.stop_training()
     INFERENCE_FILE.unlink(missing_ok=True)
     return {"status": "stopped"}
+
+
+INFER_CONFIG_FILE = (Path(__file__).parent.parent /
+                     "configs" / "inference" / "cluster_config_inference.yaml")
+INFER_SCRIPT_FILE = (Path(__file__).parent.parent.parent.parent /
+                     "scripts" / "inference" / "launch_inference.sh")
+
+
+@app.post("/api/inference/launch")
+async def launch_inference_script(req: InferenceLaunchRequest):
+    """Write cluster_config_inference.yaml and run launch_inference.sh."""
+    if not node_manager.selected:
+        raise HTTPException(400, "No nodes selected")
+
+    algorithm = req.algorithm
+    snap      = discovery.snapshot()
+
+    # Build nodes_info from selected nodes only — local machine is never included
+    # (scripts run locally and rsync TO remote nodes; including self breaks rsync)
+    nodes_info: dict = {}
+    for hostname, sel in node_manager.selected.items():
+        node_ip = snap.get(hostname, {}).get("ip", "")
+        # Alias = SSH Host entry (e.g. "mini2") — look up by IP in ~/.ssh/config,
+        # fall back to cached _ssh_aliases, then bare mDNS hostname.
+        # Never use ssh_user (username) as the alias — they're different things.
+        alias = (_SSH_CONFIG.get(node_ip, {}).get("alias")
+                 or _ssh_aliases.get(hostname)
+                 or hostname)
+        user  = _probed.get(hostname, "")
+        nodes_info[hostname] = {
+            "ssh_alias": alias,
+            "user":      user,
+            "rank":      sel["rank"],
+            "ip":        node_ip,
+        }
+
+    if not nodes_info:
+        raise HTTPException(400, "No remote nodes selected")
+
+    # Determine server: user-picked (req.server_hostname) or lowest-rank node
+    server_hostname = (
+        req.server_hostname
+        if req.server_hostname and req.server_hostname in nodes_info
+        else min(nodes_info, key=lambda h: nodes_info[h]["rank"])
+    )
+
+    try:
+        await node_manager.launch_inference_script(
+            algorithm        = algorithm,
+            server_hostname  = server_hostname,
+            nodes_info       = nodes_info,
+            config_path      = str(INFER_CONFIG_FILE),
+            script_path      = str(INFER_SCRIPT_FILE),
+        )
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+    return {"status": "launched", "algorithm": algorithm, "server": server_hostname}
 
 
 @app.post("/api/connectivity/check")

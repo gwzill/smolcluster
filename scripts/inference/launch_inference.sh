@@ -58,10 +58,10 @@ do_cleanup() {
     echo ""
 
     # Read ports from config (fall back to defaults if yq not available)
-    local API_PORT=8080
+    local API_PORT=8000
     local FRONTEND_PORT=5050
     if [[ -f "$CONFIG_FILE" ]] && command -v yq >/dev/null 2>&1; then
-        API_PORT=$(yq '.web_interface.api_port'    "$CONFIG_FILE" 2>/dev/null) || API_PORT=8080
+        API_PORT=$(yq '.web_interface.api_port'    "$CONFIG_FILE" 2>/dev/null) || API_PORT=8000
         FRONTEND_PORT=$(yq '.web_interface.frontend_port' "$CONFIG_FILE" 2>/dev/null) || FRONTEND_PORT=5050
     fi
 

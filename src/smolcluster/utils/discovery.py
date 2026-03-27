@@ -204,4 +204,4 @@ def _guess_os(props: dict) -> str:
                 return "Darwin"
             if "linux" in v_lo:
                 return "Linux"
-    return "unknown"
+    return ""

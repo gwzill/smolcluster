@@ -353,12 +353,8 @@
       <div class="ctrl-bar">
         <select id="algo-sel">
           <option value="syncps">SyncPS — Sync Parameter Server</option>
-          <option value="edp">EDP — Elastic Data Parallelism</option>
           <option value="mp">MP — Model Parallelism</option>
-          <option value="mp_pipeline">MP Pipeline</option>
-          <option value="classicdp">Classic Data Parallelism</option>
-          <option value="fsdp">FSDP — Fully Sharded</option>
-          <option value="ep">EP — Expert Parallelism</option>
+          <option value="classicdp">ClassicDP — Classic Data Parallelism</option>
         </select>
         <button class="abtn train" id="btn-train" onclick="startTraining()">
           <svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor"/></svg>
@@ -454,10 +450,11 @@ function startSSE() {
     state.running       = d.nodes.running       || {};
     state.usernames     = d.nodes.usernames     || {};
     state.ssh_aliases   = d.nodes.ssh_aliases   || {};
+    state.node_os       = d.nodes.node_os       || {};
     state.training      = d.training            || {};
     state.connectivity  = d.connectivity        || {};
 
-    const nSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames]);
+    const nSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames, state.node_os]);
     const tSig = JSON.stringify(state.training);
     const cSig = JSON.stringify(state.connectivity);
 
@@ -525,7 +522,7 @@ function buildCard(h, n) {
       <div class="nicon">${nodeIcon(n)}</div>
       <div>
         <div class="nname">${h}.local</div>
-        <div class="nmeta">${[n.os,n.os_version,n.machine].filter(Boolean).join(' · ') || 'macOS'}</div>
+        <div class="nmeta">${[n.os,n.os_version,n.machine].filter(s=>s&&s!=='unknown').join(' · ')}</div>
       </div>
     </div>
     <div class="badges"></div>
@@ -550,6 +547,15 @@ function syncCard(c, h, n) {
 
   c.className = `ncard${isRun ? ' running' : isSel ? ' in-cluster' : ''}`;
 
+  // Update OS meta if SSH probe returned info (discovered nodes start with empty OS)
+  const osInfo = state.node_os[h] || n || {};
+  const metaEl = c.querySelector('.nmeta');
+  if (metaEl) {
+    const osStr = [osInfo.os, osInfo.os_version, osInfo.machine]
+      .filter(s => s && s !== 'unknown').join(' · ');
+    if (metaEl.textContent !== osStr) metaEl.textContent = osStr;
+  }
+
   const inp   = c.querySelector('.sshinput');
   // Priority: SSH config alias > probed username > pattern guess
   const alias  = state.ssh_aliases[h];
@@ -563,8 +569,10 @@ function syncCard(c, h, n) {
 
   const badges = c.querySelector('.badges');
   if (isRun) {
-    const algo = state.running[h]?.algorithm || '';
-    badges.innerHTML = `<span class="nbadge active">● ${algo === 'infer' ? 'inferring' : 'training'}</span>`;
+    const r = state.running[h] || {};
+    const label = (r.role === 'launcher' || r.status === 'launched') ? 'inferring'
+                : r.algorithm === 'infer' ? 'inferring' : 'training';
+    badges.innerHTML = `<span class="nbadge active">● ${label}</span>`;
   } else if (isSel) {
     badges.innerHTML = `<span class="nbadge cluster">✓ in cluster</span>`;
   } else {
@@ -665,9 +673,15 @@ async function startTraining() {
   });
   if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
+let selectedServer = null;  // hostname of user-picked server node
+
 async function startInference() {
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
-  const r = await fetch('/api/inference/start', { method:'POST' });
+  const algo = $('algo-sel').value;
+  const r = await fetch('/api/inference/launch', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ algorithm: algo, server_hostname: selectedServer || '' }),
+  });
   if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
 async function checkConn() {
@@ -713,6 +727,29 @@ function resizeCvs() {
   }
 }
 new ResizeObserver(resizeCvs).observe(CVS);
+
+// ── Canvas click → pick server node ───────────────────────────────────────────
+CVS.style.cursor = 'default';
+CVS.addEventListener('mousemove', e => {
+  const rect = CVS.getBoundingClientRect();
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  const {server, workers} = getLayout();
+  const all = server ? [server, ...workers] : workers;
+  CVS.style.cursor = all.some(n => (cx-n.x)**2+(cy-n.y)**2 < 40*40) ? 'pointer' : 'default';
+});
+CVS.addEventListener('click', e => {
+  const rect = CVS.getBoundingClientRect();
+  const cx = e.clientX - rect.left;   // logical px — matches node x/y from getLayout()
+  const cy = e.clientY - rect.top;
+  const {server, workers} = getLayout();
+  const all = server ? [server, ...workers] : workers;
+  for (const node of all) {
+    if ((cx-node.x)**2 + (cy-node.y)**2 < 40*40) {
+      selectedServer = (selectedServer === node.h) ? null : node.h;
+      return;
+    }
+  }
+});
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 function getLayout() {
@@ -776,7 +813,7 @@ function drawConn(x0,y0,x1,y1, active) {
 }
 
 // ── Draw node ──────────────────────────────────────────────────────────────────
-function drawNode(x, y, label, sub, isServer, isActive, inferOk) {
+function drawNode(x, y, label, sub, isServer, isActive, inferOk, isPickedServer) {
   const r  = 36;
   const ac = isServer ? '#d06a2f' : '#177e89';
   const af = isServer ? 'rgba(208,106,47,0.13)' : 'rgba(23,126,137,0.1)';
@@ -817,6 +854,14 @@ function drawNode(x, y, label, sub, isServer, isActive, inferOk) {
     CTX.fillStyle = '#fff';
     CTX.font = 'bold 9px sans-serif'; CTX.textAlign='center'; CTX.textBaseline='middle';
     CTX.fillText(inferOk ? '✓' : '…', bx, by);
+  }
+
+  // Crown indicator for user-picked server
+  if (isPickedServer) {
+    CTX.fillStyle = '#d06a2f';
+    CTX.font = '15px sans-serif';
+    CTX.textAlign = 'center'; CTX.textBaseline = 'middle';
+    CTX.fillText('♛', x, y - r - 10);
   }
 
   // Labels
@@ -923,12 +968,12 @@ function draw(ts) {
     const sActive = server.running;
     let inferBadge;
     if (isInferring) inferBadge = inferWorkers.has(server.h);
-    drawNode(server.x, server.y, 'SERVER', server.h, true, sActive, inferBadge);
+    drawNode(server.x, server.y, 'SERVER', server.h, true, sActive, inferBadge, selectedServer === server.h);
   }
   workers.forEach(w => {
     let inferBadge;
     if (isInferring) inferBadge = inferWorkers.has(w.h);
-    drawNode(w.x, w.y, `RANK ${w.rank}`, w.h, false, w.running, inferBadge);
+    drawNode(w.x, w.y, `RANK ${w.rank}`, w.h, false, w.running, inferBadge, selectedServer === w.h);
   });
 
   requestAnimationFrame(draw);

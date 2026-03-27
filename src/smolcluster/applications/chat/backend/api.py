@@ -84,11 +84,14 @@ for worker in configured_workers:
         continue
     worker_ranks.add(int(rank))
 
-# Include rank 0 only for algorithms that have a coordinating server at rank 0
-# (SyncPS parameter server, MP model-shard coordinator). ClassicDP has no server.
+# SyncPS: server (rank 0) handles all inference internally via logit averaging —
+# workers are not directly addressable from the chat client.
+# MP: same — server is the only entry point.
+# ClassicDP: each worker is an independent replica, all are selectable.
 if INFERENCE_ALGORITHM in ("syncps", "mp"):
-    worker_ranks.add(0)
-AVAILABLE_WORKER_RANKS = sorted(worker_ranks) or [0]
+    AVAILABLE_WORKER_RANKS = [0]
+else:
+    AVAILABLE_WORKER_RANKS = sorted(worker_ranks) or [0]
 
 
 @asynccontextmanager
@@ -130,7 +133,7 @@ else:
     default_port = port_config
 
 SERVER_PORT = int(os.getenv("INFERENCE_SERVER_PORT", default_port))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "redis://0.0.0.0:6379/0")
 
 # Get web interface port from cluster config
 API_PORT = cluster_config["web_interface"]["api_port"]

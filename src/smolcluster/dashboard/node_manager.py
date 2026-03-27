@@ -6,6 +6,7 @@ Flow:
     deselect(hostname)              — unmark
     start_training(algorithm, ...)  — launch server locally + SSH workers
     start_inference(server_host)    — launch infer server + SSH workers
+    launch_inference_script(...)    — write config YAML + run launch_inference.sh
     stop_training()                 — kill everything
     probe_username(hostname, user)  — SSH whoami
 """
@@ -16,6 +17,7 @@ import os
 import shlex
 import subprocess
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -209,6 +211,95 @@ class NodeManager:
                 }
             asyncio.create_task(self._stream(hostname, proc))
 
+    # ── Inference script launcher ──────────────────────────────────────────────
+
+    async def launch_inference_script(
+        self,
+        algorithm: str,
+        server_hostname: str,
+        nodes_info: Dict[str, dict],  # hostname → {ssh_alias, user, rank, ip}
+        config_path: str,
+        script_path: str,
+    ) -> None:
+        """
+        1. Rewrite cluster_config_inference.yaml with current selected nodes.
+        2. Run scripts/inference/launch_inference.sh --algorithm <algo>.
+        3. Stream output to the log buffer.
+        """
+        import yaml as _yaml
+
+        async with self._lock:
+            if self.processes:
+                raise ValueError("Already running — stop it first")
+
+        # ── Build the updated config ──────────────────────────────────────────
+        p = Path(config_path)
+        config = {}
+        if p.exists():
+            config = _yaml.safe_load(p.read_text()) or {}
+
+        server_info = nodes_info.get(server_hostname, {})
+        server_alias = server_info.get("ssh_alias") or server_hostname
+        server_ip    = server_info.get("ip", "")
+
+        # host_ip: start from existing, then upsert discovered IPs
+        host_ip = dict(config.get("host_ip", {}))
+        if server_ip:
+            host_ip[server_alias] = server_ip
+
+        workers_regular = []
+        for hostname, info in nodes_info.items():
+            if hostname == server_hostname:
+                continue
+            alias = info.get("ssh_alias") or hostname
+            ip    = info.get("ip", "")
+            user  = info.get("user", "")
+            rank  = info.get("rank", 1)
+            workers_regular.append({"hostname": alias, "user": user, "rank": rank})
+            if ip:
+                host_ip[alias] = ip
+
+        if algorithm == "classicdp":
+            # ClassicDP: server is also rank-0 worker; no separate server role
+            server_user = server_info.get("user", "")
+            all_workers = [{"hostname": server_alias, "user": server_user, "rank": 0}] + workers_regular
+            config["server"]          = server_alias
+            config["workers"]         = {"regular": all_workers, "tablets": []}
+            config["num_workers"]     = len(all_workers)
+            config["total_num_nodes"] = len(all_workers)
+        else:
+            config["server"]          = server_alias
+            config["workers"]         = {"regular": workers_regular, "tablets": []}
+            config["num_workers"]     = len(workers_regular)
+            config["total_num_nodes"] = len(workers_regular) + 1  # +1 server
+
+        config["host_ip"] = host_ip
+
+        p.write_text(_yaml.dump(config, default_flow_style=False, allow_unicode=True))
+        self._log(server_hostname, f"[dashboard] Wrote {config_path}")
+        self._log(server_hostname,
+                  f"[dashboard] server={server_alias}, "
+                  f"workers={[w['hostname'] for w in workers_regular]}, "
+                  f"algorithm={algorithm}")
+
+        # ── Run the launch script ─────────────────────────────────────────────
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        cmd = ["bash", script_path, "--algorithm", algorithm]
+        self._log(server_hostname, f"$ {shlex.join(cmd)}")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+            cwd=str(Path(script_path).parent.parent.parent),  # project root
+        )
+        async with self._lock:
+            self.processes[server_hostname] = {
+                "rank": 0, "algorithm": algorithm, "role": "launcher", "proc": proc,
+            }
+        asyncio.create_task(self._stream(server_hostname, proc))
+
     async def stop_training(self) -> None:
         async with self._lock:
             procs = dict(self.processes)
@@ -250,10 +341,17 @@ class NodeManager:
                 for h, v in self.selected.items()}
 
     def snapshot_processes(self) -> Dict[str, dict]:
+        def _status(v):
+            rc = v["proc"].returncode
+            if rc is None:
+                return "running"
+            if v["role"] == "launcher" and rc == 0:
+                return "launched"   # script done, remote tmux sessions are live
+            return f"exited:{rc}"
         return {
             h: {
                 "rank": v["rank"], "algorithm": v["algorithm"], "role": v["role"],
-                "status": "running" if v["proc"].returncode is None else f"exited:{v['proc'].returncode}",
+                "status": _status(v),
             }
             for h, v in self.processes.items()
         }
@@ -280,5 +378,10 @@ class NodeManager:
         finally:
             await proc.wait()
             async with self._lock:
-                self.processes.pop(hostname, None)
+                info = self.processes.get(hostname, {})
+                # Keep launcher entries alive so topology stays visible after
+                # the script exits (inference continues in remote tmux sessions).
+                # Only remove on failure or explicit stop_training().
+                if not (info.get("role") == "launcher" and proc.returncode == 0):
+                    self.processes.pop(hostname, None)
             logger.info(f"[node_manager] {hostname} exited (rc={proc.returncode})")

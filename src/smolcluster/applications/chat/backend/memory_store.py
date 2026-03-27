@@ -28,7 +28,7 @@ class RedisVectorMemory:
 
     def __init__(
         self,
-        redis_url: str = "redis://localhost:6379/0",
+        redis_url: str = "redis://0.0.0.0:6379/0",
         index_name: str = "smolcluster_chat_memory_idx",
         key_prefix: str = "chatmem:",
         embedding_dim: int = 256,

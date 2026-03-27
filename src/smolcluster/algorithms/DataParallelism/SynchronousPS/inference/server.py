@@ -211,6 +211,9 @@ def main() -> None:
                     return_tensors="pt",
                     add_generation_prompt=add_generation_prompt,
                 )
+                # Older transformers versions return a BatchEncoding instead of a raw tensor
+                if hasattr(tokenized_prompt, "input_ids"):
+                    tokenized_prompt = tokenized_prompt.input_ids
                 if logger:
                     logger.info(f"Applied chat template for instruction-based model")
             except Exception as e:
@@ -218,7 +221,7 @@ def main() -> None:
                 send_message(client_socket, ("error", {"message": f"Chat template error: {str(e)}"}))
                 continue
         else:
-            # Use plain text prompt (base models or instruction models with plain text)
+            
             tokenized_prompt = tokenizer(prompt, return_tensors="pt").input_ids
 
         original_prompt_length = tokenized_prompt.shape[1]

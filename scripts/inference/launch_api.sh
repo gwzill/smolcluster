@@ -13,7 +13,7 @@ BACKEND="model_parallelism"
 INFERENCE_ALGORITHM=""
 LAUNCH_INFERENCE=true
 LAUNCH_REDIS=true
-REDIS_URL="redis://localhost:6379/0"
+REDIS_URL="redis://0.0.0.0:6379/0"
 REDIS_CONTAINER_NAME="smolcluster-redis"
 SESSION_PREFIX="mp"
 SERVER_HOST_OVERRIDE=""
@@ -82,17 +82,19 @@ API_PORT=$(yq '.web_interface.api_port' "$CONFIG_FILE")
 FRONTEND_PORT=$(yq '.web_interface.frontend_port' "$CONFIG_FILE")
 
 # Update index.html with correct API_URL before launching
+# Use the machine's real hostname so browsers can actually connect.
+# 0.0.0.0 is a valid bind address but browsers block it as a destination URL.
 HTML_FILE="$FRONTEND_DIR/index.html"
-echo "📝 Updating API URL in index.html to use port $API_PORT..."
-# Use sed to replace the default API_URL with the correct one
+API_HOST="$(hostname -f 2>/dev/null || hostname).local"
+# Strip any extra .local.local
+API_HOST="${API_HOST/.local.local/.local}"
+echo "📝 Updating API URL in index.html → http://$API_HOST:$API_PORT ..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS sed syntax
-    sed -i '' "s|let API_URL = 'http://localhost:[0-9]*';|let API_URL = 'http://localhost:$API_PORT';|g" "$HTML_FILE"
+    sed -i '' "s|let API_URL = 'http://[^']*';|let API_URL = 'http://$API_HOST:$API_PORT';|g" "$HTML_FILE"
 else
-    # Linux sed syntax
-    sed -i "s|let API_URL = 'http://localhost:[0-9]*';|let API_URL = 'http://localhost:$API_PORT';|g" "$HTML_FILE"
+    sed -i "s|let API_URL = 'http://[^']*';|let API_URL = 'http://$API_HOST:$API_PORT';|g" "$HTML_FILE"
 fi
-echo "[OK] Updated API_URL to http://localhost:$API_PORT"
+echo "[OK] Updated API_URL to http://$API_HOST:$API_PORT"
 
 DRY_RUN=${DRY_RUN:-false}
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -279,9 +281,9 @@ else
         RETRY_DELAY=2
         API_READY=false
         for i in $(seq 1 $MAX_RETRIES); do
-            HEALTH_RESPONSE=$(curl -fsS http://localhost:$API_PORT/health 2>/dev/null || true)
+            HEALTH_RESPONSE=$(curl -fsS http://127.0.0.1:$API_PORT/health 2>/dev/null || true)
             if echo "$HEALTH_RESPONSE" | grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true'; then
-                echo "[OK] API is ready and responding on http://localhost:$API_PORT"
+                echo "[OK] API is ready and responding on http://$API_HOST:$API_PORT"
                 API_READY=true
                 break
             else
@@ -325,16 +327,16 @@ else
         echo "[INFO] Waiting for frontend to be ready..."
         FRONTEND_READY=false
         for i in $(seq 1 10); do
-            if curl -fsS http://localhost:$FRONTEND_PORT >/dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:$FRONTEND_PORT >/dev/null 2>&1; then
                 FRONTEND_READY=true
                 break
             fi
             sleep 1
         done
         if [[ "$FRONTEND_READY" == "true" ]]; then
-            echo "[OK] Frontend is ready on http://localhost:$FRONTEND_PORT"
+            echo "[OK] Frontend is ready on http://$API_HOST:$FRONTEND_PORT"
         else
-            echo "[ERROR] Frontend did not become ready on http://localhost:$FRONTEND_PORT"
+            echo "[ERROR] Frontend did not become ready on http://$API_HOST:$FRONTEND_PORT"
             echo "   Check logs: tail -f $FRONTEND_LOG"
             exit 1
         fi
@@ -348,9 +350,9 @@ echo ""
 echo "🎉 API and Frontend launch complete!"
 echo ""
 echo "📊 Access points:"
-echo "   API:      http://localhost:$API_PORT"
-echo "   Frontend: http://localhost:$FRONTEND_PORT"
-echo "   Health:   http://localhost:$API_PORT/health"
+echo "   API:      http://$API_HOST:$API_PORT"
+echo "   Frontend: http://$API_HOST:$FRONTEND_PORT"
+echo "   Health:   http://$API_HOST:$API_PORT/health"
 echo ""
 echo "🔍 Check status:"
 echo "   tmux ls"
