@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 FRONTEND_DIR   = Path(__file__).parent / "frontend"
 METRICS_FILE   = Path("/tmp/smolcluster_metrics.json")
 INFERENCE_FILE = Path("/tmp/smolcluster_inference.json")
+TOKEN_PING     = Path("/tmp/smolcluster_token_ping")
 
 
 # ── SSH config parsing ─────────────────────────────────────────────────────────
@@ -311,12 +312,19 @@ async def launch_inference_script(req: InferenceLaunchRequest):
     nodes_info: dict = {}
     for hostname, sel in node_manager.selected.items():
         node_ip = snap.get(hostname, {}).get("ip", "")
-        # Alias = SSH Host entry (e.g. "mini2") — look up by IP in ~/.ssh/config,
-        # fall back to cached _ssh_aliases, then bare mDNS hostname.
+        # Alias = SSH Host entry (e.g. "mini2") — try four ways in order:
+        # 1. By LAN IP  (SSH config has HostName 10.x.x.x)
+        # 2. By mDNS FQDN  (SSH config has HostName macmini3-5.local)
+        # 3. By bare hostname  (SSH config has HostName macmini3-5)
+        # 4. Probed alias cache (populated by _probe_and_store after node discovery)
         # Never use ssh_user (username) as the alias — they're different things.
-        alias = (_SSH_CONFIG.get(node_ip, {}).get("alias")
-                 or _ssh_aliases.get(hostname)
-                 or hostname)
+        alias = (
+            _SSH_CONFIG.get(node_ip, {}).get("alias")
+            or _SSH_CONFIG.get(f"{hostname}.local", {}).get("alias")
+            or _SSH_CONFIG.get(hostname, {}).get("alias")
+            or _ssh_aliases.get(hostname)
+            or hostname
+        )
         user  = _probed.get(hostname, "")
         nodes_info[hostname] = {
             "ssh_alias": alias,
@@ -380,6 +388,7 @@ async def sse_events():
                 },
                 "training":     _read_json(METRICS_FILE),
                 "connectivity": _read_json(INFERENCE_FILE),
+                "token_ts":     TOKEN_PING.stat().st_mtime if TOKEN_PING.exists() else 0,
             })
             yield f"data: {payload}\n\n"
             await asyncio.sleep(1)

@@ -134,6 +134,7 @@ else:
 
 SERVER_PORT = int(os.getenv("INFERENCE_SERVER_PORT", default_port))
 REDIS_URL = os.getenv("REDIS_URL", "redis://0.0.0.0:6379/0")
+_TOKEN_PING = Path("/tmp/smolcluster_token_ping")
 
 # Get web interface port from cluster config
 API_PORT = cluster_config["web_interface"]["api_port"]
@@ -319,6 +320,11 @@ async def get_config():
         "decoding_strategy": active_strategy,
         "temperature": strategy_params["temperature"],
         f"{active_strategy}": strategy_params,
+        "cluster_server": server_hostname,
+        "cluster_nodes": [server_hostname] + [
+            w.get("hostname", "") for w in configured_workers
+            if isinstance(w, dict) and w.get("hostname")
+        ],
     }
 
 
@@ -513,7 +519,9 @@ async def chat(chat_request: ChatRequest, http_request: Request):
                 command, result = response
 
                 if command == "token":
-                    # Received token from worker
+                    # Ping dashboard so its topology animation knows tokens are flowing
+                    try: _TOKEN_PING.touch()
+                    except OSError: pass
                     token_text = result.get("text", "")
                     token_idx = result.get("token_idx", 0)
                     

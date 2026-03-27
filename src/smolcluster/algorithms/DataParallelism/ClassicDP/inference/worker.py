@@ -25,7 +25,7 @@ CONFIG_DIR = Path(__file__).parent.parent.parent.parent.parent / "configs"
 with open(CONFIG_DIR / "inference" / "model_config_inference.yaml") as f:
     inference_config = yaml.safe_load(f)
 
-with open(CONFIG_DIR / "cluster_config_classicdp.yaml") as f:
+with open(CONFIG_DIR / "inference" / "cluster_config_inference.yaml") as f:
     cluster_config = yaml.safe_load(f)
 
 model_configs = inference_config.get("dp", inference_config)
@@ -49,7 +49,7 @@ def resolve_model_config(cfg: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 MODEL_NAME, MODEL_CFG = resolve_model_config(model_configs)
-TOPOLOGY = cluster_config["allToAllTopology"]["workers"]["regular"]
+TOPOLOGY = cluster_config["workers"]["regular"]
 
 if len(sys.argv) > 1:
     WORKER_RANK = int(sys.argv[1])

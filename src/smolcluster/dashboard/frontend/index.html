@@ -48,8 +48,8 @@
       background: var(--panel); backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--line);
     }
-    .logo { font-size: 19px; font-weight: 700; letter-spacing: -.5px; }
-    .logo em { color: var(--teal); font-style: normal; }
+    .logo { font-size: 19px; font-weight: 700; letter-spacing: -.5px; color: var(--ink); }
+    .logo em { color: var(--ink); font-style: normal; }
     .hstats { display: flex; gap: 22px; font-size: 12px; color: var(--ink-2); }
     .hstat { display: flex; align-items: center; gap: 6px; }
     .pip { width: 7px; height: 7px; border-radius: 50%; background: #ccc; }
@@ -453,6 +453,7 @@ function startSSE() {
     state.node_os       = d.nodes.node_os       || {};
     state.training      = d.training            || {};
     state.connectivity  = d.connectivity        || {};
+    state.token_ts      = d.token_ts            || 0;
 
     const nSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames, state.node_os]);
     const tSig = JSON.stringify(state.training);
@@ -480,7 +481,7 @@ function startLogs() {
 // ════════════════════════════════════════════════════════════════════════════
 function renderHeader() {
   setText('lbl-disc', `${Object.keys(state.discovered).length} discovered`);
-  const n = Object.keys(state.selected).length + Object.keys(state.running).length;
+  const n = new Set([...Object.keys(state.selected), ...Object.keys(state.running)]).size;
   setText('lbl-clus', `${n} in cluster`);
 }
 
@@ -673,16 +674,30 @@ async function startTraining() {
   });
   if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
-let selectedServer = null;  // hostname of user-picked server node
+let selectedServer = null;   // hostname of user-picked server node
+let inferLocked    = false;  // true while inference is running — blocks server re-selection
 
 async function startInference() {
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
   const algo = $('algo-sel').value;
+
+  // SyncPS: auto-pick a random selected node as server (user doesn't need to pick)
+  let srv = selectedServer;
+  if (algo === 'syncps' || !srv) {
+    const hosts = Object.keys(state.selected);
+    srv = hosts[Math.floor(Math.random() * hosts.length)];
+    selectedServer = srv;
+  }
+
   const r = await fetch('/api/inference/launch', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ algorithm: algo, server_hostname: selectedServer || '' }),
+    body: JSON.stringify({ algorithm: algo, server_hostname: srv }),
   });
-  if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
+  if (r.ok) {
+    inferLocked = true;
+  } else {
+    alert(`Error: ${(await r.json()).detail}`);
+  }
 }
 async function checkConn() {
   const r = await fetch('/api/connectivity/check', { method:'POST' });
@@ -691,6 +706,8 @@ async function checkConn() {
 async function stopAll() {
   await fetch('/api/training/stop',  { method:'POST' });
   await fetch('/api/inference/stop', { method:'POST' });
+  inferLocked    = false;
+  selectedServer = null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -714,8 +731,11 @@ function nodeIcon(n) {
 const CVS = $('topo');
 const CTX = CVS.getContext('2d');
 const DPR = window.devicePixelRatio || 1;
-let particles = [];
-let spawnTs   = 0;
+let particles      = [];
+let spawnTs        = 0;
+let inferParticles = [];
+let inferSpawnTs   = 0;
+let _activeAlgo    = '';
 
 // ── Resize ────────────────────────────────────────────────────────────────────
 function resizeCvs() {
@@ -731,6 +751,7 @@ new ResizeObserver(resizeCvs).observe(CVS);
 // ── Canvas click → pick server node ───────────────────────────────────────────
 CVS.style.cursor = 'default';
 CVS.addEventListener('mousemove', e => {
+  if (inferLocked) { CVS.style.cursor = 'default'; return; }
   const rect = CVS.getBoundingClientRect();
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
   const {server, workers} = getLayout();
@@ -738,8 +759,9 @@ CVS.addEventListener('mousemove', e => {
   CVS.style.cursor = all.some(n => (cx-n.x)**2+(cy-n.y)**2 < 40*40) ? 'pointer' : 'default';
 });
 CVS.addEventListener('click', e => {
+  if (inferLocked) return;
   const rect = CVS.getBoundingClientRect();
-  const cx = e.clientX - rect.left;   // logical px — matches node x/y from getLayout()
+  const cx = e.clientX - rect.left;
   const cy = e.clientY - rect.top;
   const {server, workers} = getLayout();
   const all = server ? [server, ...workers] : workers;
@@ -765,7 +787,7 @@ function getLayout() {
   }
   workers.sort((a,b)=>a.rank-b.rank);
 
-  const algo = $('algo-sel').value;
+  const algo = _activeAlgo || $('algo-sel').value;
   const hasServer = !['classicdp','fsdp','ep','mp_pipeline'].includes(algo);
 
   const sx = W/2, sy = H * 0.22;
@@ -885,22 +907,27 @@ function bp(t, x0,y0, cpx,cpy, x1,y1) {
 // ── Main draw loop ─────────────────────────────────────────────────────────────
 function draw(ts) {
   resizeCvs();
+
+  // ── Determine active state ──────────────────────────────────────────────────
+  const runningVals = Object.values(state.running);
+  const inferEntry  = runningVals.find(r => r.role === 'launcher' || r.algorithm === 'infer');
+  const isInferring = !!inferEntry;
+  const inferAlgo   = inferEntry?.algorithm || $('algo-sel').value;
+  const isTraining  = !isInferring && runningVals.some(r => r.role === 'server' || r.role === 'worker');
+  const isActive    = isTraining || isInferring;
+  _activeAlgo       = isInferring ? inferAlgo : '';
+
   const {W, H, server, workers} = getLayout();
   CTX.clearRect(0, 0, W, H);
   drawGrid(W, H);
-
-  const isTraining  = Object.values(state.running).some(r => r.algorithm !== 'infer');
-  const isInferring = Object.values(state.running).some(r => r.algorithm === 'infer');
-  const isActive    = isTraining || isInferring;
 
   // Algo label
   const tag = $('topo-tag');
   const allInCluster = {...state.selected, ...state.running};
   if (Object.keys(allInCluster).length) {
-    const algo = isActive
-      ? (isInferring ? 'INFERENCE' : $('algo-sel').value.toUpperCase() + ' TOPOLOGY')
-      : ($('algo-sel').value.toUpperCase() + ' TOPOLOGY');
-    tag.textContent = algo;
+    tag.textContent = isInferring
+      ? inferAlgo.toUpperCase() + ' INFERENCE'
+      : $('algo-sel').value.toUpperCase() + ' TOPOLOGY';
   } else {
     tag.textContent = '';
   }
@@ -920,32 +947,27 @@ function draw(ts) {
     requestAnimationFrame(draw); return;
   }
 
-  // Connections
+  // ── Connections ─────────────────────────────────────────────────────────────
   if (server) {
-    workers.forEach(w => {
-      drawConn(server.x, server.y, w.x, w.y, isActive && w.running);
-    });
+    workers.forEach(w => drawConn(server.x, server.y, w.x, w.y, isActive && w.running));
   } else if (workers.length >= 2) {
-    for (let i=0;i<workers.length;i++)
-      for (let j=i+1;j<workers.length;j++)
-        drawConn(workers[i].x,workers[i].y,workers[j].x,workers[j].y,
-                 isActive && workers[i].running && workers[j].running);
+    // classicdp: star from rank-0
+    const r0 = workers[0];
+    workers.slice(1).forEach(w =>
+      drawConn(r0.x, r0.y, w.x, w.y, isActive && r0.running && w.running));
   }
 
-  // Spawn particles
-  if (isActive && server && ts - spawnTs > 380) {
+  // ── TRAINING particles (gradients up / weights down) ──────────────────────
+  if (isTraining && server && ts - spawnTs > 380) {
     workers.filter(w => w.running).forEach(w => {
-      // gradient up
       particles.push({sx:w.x,sy:w.y, ex:server.x,ey:server.y, cpOff:-20,
                       t:0, speed:0.007+Math.random()*.004, col:'26,158,99', sz:4});
-      // weights down
       particles.push({sx:server.x,sy:server.y, ex:w.x,ey:w.y, cpOff:+20,
                       t:0.2+Math.random()*.15, speed:0.006+Math.random()*.004, col:'208,106,47', sz:3.5});
     });
     spawnTs = ts;
   }
-
-  // Move + draw particles
+  if (!isTraining) particles = [];
   particles = particles.filter(p => { p.t += p.speed; return p.t < 1; });
   particles.forEach(p => {
     const cpx = (p.sx+p.ex)/2 + p.cpOff, cpy = (p.sy+p.ey)/2;
@@ -953,22 +975,71 @@ function draw(ts) {
     const fade = Math.min(1, Math.sin(p.t * Math.PI) * 1.5);
     CTX.beginPath(); CTX.arc(x, y, p.sz, 0, Math.PI*2);
     CTX.fillStyle = `rgba(${p.col},${fade.toFixed(2)})`; CTX.fill();
-    // tiny trail
-    const tTrail = Math.max(0, p.t - 0.05);
-    const {x:tx, y:ty} = bp(tTrail, p.sx,p.sy, cpx,cpy, p.ex,p.ey);
+    const tT = Math.max(0, p.t - 0.05);
+    const {x:tx, y:ty} = bp(tT, p.sx,p.sy, cpx,cpy, p.ex,p.ey);
     CTX.beginPath(); CTX.arc(tx, ty, p.sz*.5, 0, Math.PI*2);
     CTX.fillStyle = `rgba(${p.col},${(fade*.35).toFixed(2)})`; CTX.fill();
   });
 
-  // Infer connected set (for badges)
-  const inferWorkers = new Set((state.connectivity?.workers || []).map(w=>w.hostname));
+  // ── INFERENCE particles — same pattern as chat app, dashboard glow style ────
+  // Coordinator = server node (syncps/mp) or rank-0 worker (classicdp)
+  const inferCoord = server || workers[0];
+  const inferPeers = server ? workers : workers.slice(1);
 
-  // Draw nodes
+  if (isInferring && inferCoord && inferPeers.length) {
+    // Only spawn when tokens are actually flowing (ping file touched by chat backend)
+    const tokenRecent = state.token_ts && (Date.now() / 1000 - state.token_ts) < 1.5;
+
+    if (tokenRecent && inferParticles.length === 0 && ts - inferSpawnTs > 300) {
+      // Out: coordinator → all peers (teal) — exactly like chat app spawnDots()
+      inferPeers.forEach(w => {
+        inferParticles.push({sx:inferCoord.x, sy:inferCoord.y, tx:w.x, ty:w.y,
+          cpOff:-18, t:0, speed:0.022, col:'23,126,137', sz:5.5});
+      });
+      // Back: all peers → coordinator (orange, 380ms later — same as chat app)
+      inferPeers.forEach(w => {
+        inferParticles.push({sx:w.x, sy:w.y, tx:inferCoord.x, ty:inferCoord.y,
+          cpOff:+18, t:-0.022*380/16.67, speed:0.026, col:'208,106,47', sz:4.5});
+      });
+      inferSpawnTs = ts;
+    }
+  }
+  if (!isInferring) inferParticles = [];
+
+  // Move + draw — dashboard glow style (bezier path, outer glow, white core, trail)
+  inferParticles = inferParticles.filter(p => { p.t += p.speed; return p.t < 1; });
+  inferParticles.forEach(p => {
+    if (p.t <= 0) return;
+    const cpx = (p.sx + p.tx) / 2 + p.cpOff, cpy = (p.sy + p.ty) / 2;
+    const {x, y} = bp(p.t, p.sx, p.sy, cpx, cpy, p.tx, p.ty);
+    const fade   = Math.min(1, Math.sin(p.t * Math.PI) * 1.7);
+
+    CTX.save();
+    CTX.shadowBlur  = 18;
+    CTX.shadowColor = `rgba(${p.col},0.95)`;
+    CTX.beginPath(); CTX.arc(x, y, p.sz, 0, Math.PI * 2);
+    CTX.fillStyle = `rgba(${p.col},${fade.toFixed(2)})`; CTX.fill();
+    CTX.restore();
+
+    CTX.beginPath(); CTX.arc(x, y, p.sz * 0.4, 0, Math.PI * 2);
+    CTX.fillStyle = `rgba(255,255,255,${(fade * 0.92).toFixed(2)})`; CTX.fill();
+
+    const tT = Math.max(0, p.t - 0.07);
+    const {x:tx2, y:ty2} = bp(tT, p.sx, p.sy, cpx, cpy, p.tx, p.ty);
+    CTX.save();
+    CTX.shadowBlur  = 8;
+    CTX.shadowColor = `rgba(${p.col},0.5)`;
+    CTX.beginPath(); CTX.arc(tx2, ty2, p.sz * 0.6, 0, Math.PI * 2);
+    CTX.fillStyle = `rgba(${p.col},${(fade * 0.28).toFixed(2)})`; CTX.fill();
+    CTX.restore();
+  });
+
+  // ── Draw nodes ──────────────────────────────────────────────────────────────
+  const inferWorkers = new Set((state.connectivity?.workers || []).map(w => w.hostname));
   if (server) {
-    const sActive = server.running;
     let inferBadge;
     if (isInferring) inferBadge = inferWorkers.has(server.h);
-    drawNode(server.x, server.y, 'SERVER', server.h, true, sActive, inferBadge, selectedServer === server.h);
+    drawNode(server.x, server.y, 'SERVER', server.h, true, server.running, inferBadge, selectedServer === server.h);
   }
   workers.forEach(w => {
     let inferBadge;

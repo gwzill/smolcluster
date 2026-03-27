@@ -4,7 +4,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-CONFIG_FILE="$PROJECT_DIR/src/smolcluster/configs/cluster_config_classicdp.yaml"
+CONFIG_FILE="$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_inference.yaml"
 REMOTE_PROJECT_DIR="~/Desktop/smolcluster"
 
 DRY_RUN=false
@@ -18,13 +18,23 @@ fi
 
 export WANDB_API_KEY="$WANDB_API_TOKEN"
 
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "❌ Config not found: $CONFIG_FILE"
+    exit 1
+fi
+
+# Build WORKERS array from cluster_config_inference.yaml: "hostname:rank:ip:port"
 WORKERS=()
-while IFS= read -r worker; do
-    [[ -n "$worker" ]] && WORKERS+=("$worker")
-done < <(yq '.allToAllTopology.workers.regular[] | .hostname + ":" + (.rank | tostring) + ":" + .ip + ":" + (.port | tostring)' "$CONFIG_FILE")
+while IFS= read -r hostrank; do
+    hostname=$(echo "$hostrank" | cut -d'|' -f1)
+    rank=$(echo "$hostrank" | cut -d'|' -f2)
+    ip=$(yq ".host_ip[\"$hostname\"] // \"\"" "$CONFIG_FILE")
+    port=$(yq ".port[\"$hostname\"] // .port.default // 65432" "$CONFIG_FILE")
+    WORKERS+=("${hostname}:${rank}:${ip}:${port}")
+done < <(yq '.workers.regular[] | .hostname + "|" + (.rank | tostring)' "$CONFIG_FILE")
 
 if [[ ${#WORKERS[@]} -eq 0 ]]; then
-    echo "❌ No workers found in allToAllTopology.workers.regular"
+    echo "❌ No workers found in workers.regular (cluster_config_inference.yaml)"
     exit 1
 fi
 
@@ -42,19 +52,7 @@ if [[ -z "$RANK0_ENTRY" ]]; then
     exit 1
 fi
 
-# Validate total_num_nodes: ClassicDP has no separate server — all nodes are workers.
-CLASSIC_TOTAL_NUM_NODES=$(yq '.total_num_nodes' "$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_inference.yaml" 2>/dev/null)
-CLASSIC_WORKER_COUNT=${#WORKERS[@]}
-if [[ -n "$CLASSIC_TOTAL_NUM_NODES" && "$CLASSIC_TOTAL_NUM_NODES" != "null" ]]; then
-    if [[ "$CLASSIC_WORKER_COUNT" -ne "$CLASSIC_TOTAL_NUM_NODES" ]]; then
-        echo "❌ Node count mismatch for ClassicDP:"
-        echo "   total_num_nodes=$CLASSIC_TOTAL_NUM_NODES (cluster_config_inference.yaml)"
-        echo "   workers in allToAllTopology=$CLASSIC_WORKER_COUNT (cluster_config_classicdp.yaml)"
-        echo "   ClassicDP: all nodes are workers (no dedicated server). Worker count must equal total_num_nodes."
-        exit 1
-    fi
-    echo "✅ Node count OK: $CLASSIC_WORKER_COUNT workers == total_num_nodes=$CLASSIC_TOTAL_NUM_NODES"
-fi
+echo "✅ Loaded ${#WORKERS[@]} workers from cluster_config_inference.yaml"
 
 RANK0_HOST=$(echo "$RANK0_ENTRY" | cut -d: -f1)
 RANK0_IP=$(echo "$RANK0_ENTRY" | cut -d: -f3)
@@ -76,8 +74,8 @@ for entry in "${WORKERS[@]}"; do
 done
 
 echo "🚀 Launching ClassicDP inference"
-echo "📁 Project: $PROJECT_DIR"
-echo "⚙️  Config: $CONFIG_FILE"
+echo "📁 Project:  $PROJECT_DIR"
+echo "⚙️  Config:   $CONFIG_FILE"
 echo "🧠 Leader (rank 0): $RANK0_HOST @ $RANK0_IP:$RANK0_PORT"
 
 echo "📦 Syncing code to remote ClassicDP nodes"
