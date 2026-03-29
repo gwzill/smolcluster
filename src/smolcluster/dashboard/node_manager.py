@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 REMOTE_REPO = "~/smolcluster"
 LOG_MAXLINES = 500  # global circular buffer
 
+# algorithm → (config_filename, script_filename, topology_type)
+# topology_type:
+#   "flat_server"   — dedicated server (.server) + flat workers list (.workers[])
+#   "nested_server" — dedicated server (.server) + .workers.{regular,tablets}
+#   "allToAll"      — all nodes in .allToAllTopology.workers.regular (no dedicated server)
+#   "pipeline"      — all nodes in .pipelineTopology.workers.regular (no dedicated server)
+_TRAINING_ALGO_MAP: dict = {
+    "syncps":      ("cluster_config_syncps.yaml",      "launch_syncps_train_gpt.sh",       "flat_server"),
+    "mp":          ("cluster_config_mp.yaml",           "launch_mp_train_gpt.sh",           "nested_server"),
+    "classicdp":   ("cluster_config_classicdp.yaml",   "launch_dp_train_gpt.sh",           "allToAll"),
+    "fsdp":        ("cluster_config_fsdp.yaml",         "launch_fsdp_train_gpt.sh",         "allToAll"),
+    "ep":          ("cluster_config_ep.yaml",           "launch_ep_train_moe.sh",           "allToAll"),
+    "mp_pipeline": ("cluster_config_mp_pipeline.yaml", "launch_mp_pipeline_train_gpt.sh",  "pipeline"),
+    "edp":         ("cluster_config_edp.yaml",          "launch_edp_train_gpt.sh",          "flat_server"),
+}
+
 
 def _build_ssh_target(ssh_user: str, hostname: str) -> str:
     """
@@ -293,6 +309,110 @@ class NodeManager:
             stderr=asyncio.subprocess.STDOUT,
             env=env,
             cwd=str(Path(script_path).parent.parent.parent),  # project root
+        )
+        async with self._lock:
+            self.processes[server_hostname] = {
+                "rank": 0, "algorithm": algorithm, "role": "launcher", "proc": proc,
+            }
+        asyncio.create_task(self._stream(server_hostname, proc))
+
+    # ── Training script launcher ───────────────────────────────────────────────
+
+    async def launch_training_script(
+        self,
+        algorithm: str,
+        server_hostname: str,
+        nodes_info: Dict[str, dict],  # hostname → {ssh_alias, user, rank, ip}
+        configs_dir: str,             # path to src/smolcluster/configs/
+        scripts_dir: str,             # path to scripts/training/
+    ) -> None:
+        """
+        1. Rewrite the algorithm-specific training config YAML with current nodes.
+        2. Run the matching training shell script.
+        3. Stream output to the log buffer.
+        """
+        import yaml as _yaml
+
+        async with self._lock:
+            if self.processes:
+                raise ValueError("Already running — stop it first")
+
+        if algorithm not in _TRAINING_ALGO_MAP:
+            raise ValueError(f"Unknown training algorithm: {algorithm}")
+
+        config_file, script_file, topology = _TRAINING_ALGO_MAP[algorithm]
+        config_path = Path(configs_dir) / config_file
+        script_path = Path(scripts_dir) / script_file
+
+        config: dict = {}
+        if config_path.exists():
+            config = _yaml.safe_load(config_path.read_text()) or {}
+
+        server_info  = nodes_info.get(server_hostname, {})
+        server_alias = server_info.get("ssh_alias") or server_hostname
+
+        if topology in ("flat_server", "nested_server"):
+            # Update top-level host_ip
+            host_ip = dict(config.get("host_ip", {}))
+            for hostname, info in nodes_info.items():
+                alias = info.get("ssh_alias") or hostname
+                ip    = info.get("ip", "")
+                if ip:
+                    host_ip[alias] = ip
+            config["host_ip"] = host_ip
+
+            config["server"] = server_alias
+
+            workers = [
+                {"hostname": (info.get("ssh_alias") or hostname), "rank": info["rank"]}
+                for hostname, info in nodes_info.items()
+                if hostname != server_hostname
+            ]
+            workers.sort(key=lambda w: w["rank"])
+
+            if topology == "flat_server":
+                config["workers"]     = workers
+            else:  # nested_server
+                config["workers"]     = {"regular": workers, "tablets": []}
+            config["num_workers"] = len(workers)
+
+        elif topology in ("allToAll", "pipeline"):
+            # All nodes are workers — sort by selection rank, assign 0-indexed ranks
+            # server_hostname gets rank 0
+            nodes_sorted = sorted(
+                nodes_info.items(),
+                key=lambda x: (0 if x[0] == server_hostname else x[1]["rank"]),
+            )
+            all_workers = []
+            for i, (hostname, info) in enumerate(nodes_sorted):
+                alias = info.get("ssh_alias") or hostname
+                ip    = info.get("ip", "")
+                entry: dict = {"hostname": alias, "rank": i, "ip": ip}
+                if topology == "allToAll":
+                    entry["port"] = 65432 + i
+                all_workers.append(entry)
+
+            topo_key = "allToAllTopology" if topology == "allToAll" else "pipelineTopology"
+            config[topo_key]      = {"workers": {"regular": all_workers, "tablets": []}}
+            config["num_workers"] = len(all_workers)
+            config["num_nodes"]   = len(all_workers)
+
+        config_path.write_text(_yaml.dump(config, default_flow_style=False, allow_unicode=True))
+        self._log(server_hostname, f"[dashboard] Wrote {config_path}")
+        self._log(server_hostname,
+                  f"[dashboard] algorithm={algorithm}, topology={topology}, "
+                  f"nodes={list(nodes_info.keys())}")
+
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        cmd = ["bash", str(script_path)]
+        self._log(server_hostname, f"$ {shlex.join(cmd)}")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+            cwd=str(Path(scripts_dir).parent.parent),  # project root
         )
         async with self._lock:
             self.processes[server_hostname] = {

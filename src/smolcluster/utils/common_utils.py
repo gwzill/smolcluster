@@ -6,8 +6,6 @@ import logging
 from copy import deepcopy
 from typing import Any, Optional
 import torch
-from transformers import GenerationConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
         
 # Module logger
 logger = logging.getLogger(__name__)
@@ -346,6 +344,8 @@ def load_model_and_tokenizer(
         Tuple of (model or None, tokenizer or None).
     """
   
+    from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: PLC0415
+
     model = None
     if load_model:
         if logger:
@@ -420,7 +420,7 @@ def get_generation_config_defaults(
 
     """
     try:
-      
+        from transformers import GenerationConfig  # noqa: PLC0415
         gen_cfg = GenerationConfig.from_pretrained(hf_model_name, token=hf_token)
         
         # Extract relevant generation parameters

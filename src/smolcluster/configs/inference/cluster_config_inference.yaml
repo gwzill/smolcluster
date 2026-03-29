@@ -1,61 +1,47 @@
+buffer_size:
+  macbook: 8
+  mini1: 8
+  mini2: 8
+  mini3: 8
+  pi4: 2
+  pi5: 2
+  win: 1
 host_ip:
-  mini1: "10.10.0.1"
-  mini2: "10.10.0.2"
-  mini3: "10.10.0.3"
-  pi4: "10.10.0.1"
-  macbook: "10.10.0.1"
-  pi5: "192.168.50.1"
-  win: "10.10.0.1"
-  ipad: "172.20.10.3"
-
+  ipad: 172.20.10.3
+  macbook: 10.10.0.1
+  mini1: 10.10.0.1
+  mini2: 10.10.0.2
+  mini3: 10.10.0.3
+  pi4: 10.10.0.1
+  pi5: 192.168.50.1
+  win: 10.10.0.1
+metrics_log_interval: 50
+model_name: causal_gpt2
+num_layers: 6
+num_nodes: 3
+num_workers: 2
 port:
   default: 65432
+  ipad: 8000
+  macbook: 65432
   mini1: 65432
   mini2: 65432
   mini3: 65432
   pi4: 65432
-  macbook: 65432
   pi5: 65432
   win: 65432
-  ipad: 8000  # iPad uses port 8000 (port forwarding from external network)
-
-# Web interface ports
+server: mini2
+total_num_nodes: 2
+track_network_metrics: true
 web_interface:
-  api_port: 8080      # FastAPI backend port
-  frontend_port: 5050  # HTML frontend port
-
-# Network buffer sizes (in MB) - device-specific optimizations
-buffer_size:
-  mini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
-  mini2: 8  # Mac Mini - 8MB
-  mini3: 8  # Mac Mini - 8MB
-  macbook: 8  # MacBook - 8MB
-  pi4: 2  # Raspberry Pi 4 - 2MB (Gigabit Ethernet)
-  pi5: 2  # Raspberry Pi 5 - 2MB (Gigabit Ethernet)
-  win: 1  # Windows 11 - 1MB (conservative for compatibility)
-
-# Network metrics tracking
-track_network_metrics: true  # Enable bandwidth, latency, buffer usage tracking
-metrics_log_interval: 50  # Log network metrics every N steps
-
-
-# Cluster configuration
-num_workers: 2
-total_num_nodes: 3
-
-server: mini1  # Server hostname (rank 0 for SyncPS inference)
+  api_port: 8000
+  frontend_port: 5050
 workers:
   regular:
-    - hostname: mini2
-      user: yuvrajsingh2
-      rank: 1
-
-    - hostname: mini3
-      user: yuvrajsingh3
-      rank: 2
-
-#-------------------------------------------------------------------------
-#Model parallelism specific configs
-num_nodes: 3
-num_layers: 6  # Number of transformer blocks (auto-detected from model, this is just for reference)
-model_name: causal_gpt2 
+  - hostname: mini2
+    rank: 0
+    user: yuvrajsingh2
+  - hostname: mini3
+    rank: 2
+    user: yuvrajsingh3
+  tablets: []

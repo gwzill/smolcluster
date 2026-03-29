@@ -106,7 +106,93 @@ Nodes are connected via **Thunderbolt fabric** (40 Gbps point-to-point). Static 
 
 ---
 
-## Prerequisites
+## Automated Setup (recommended)
+
+Two scripts handle everything end-to-end. Run them once from `mini1` after completing the Thunderbolt networking steps above.
+
+### Step 1 — SSH keys and config
+
+```bash
+./scripts/installations/setup_ssh.sh
+```
+
+This script:
+- Generates `~/.ssh/smolcluster_key` (ed25519) if it doesn't exist
+- Prompts you for each worker's alias, IP, and username
+- Writes a clean `~/.ssh/config` block (between `# BEGIN smolcluster` / `# END smolcluster` markers so it's safe to re-run)
+- Pushes the public key to every worker via `ssh-copy-id`
+- Smoke-tests SSH connectivity to all nodes
+- Saves the node list to `~/.config/smolcluster/nodes` for use by `setup.sh`
+
+Example session:
+```
+  Node 1 alias  (e.g. mini1, or press Enter to finish): mini2
+  Node 1 IP     (e.g. 10.10.0.1): 10.10.0.2
+  Node 1 user   (macOS username on that machine): yuvrajsingh2
+
+  Node 2 alias  (e.g. mini2, or press Enter to finish): mini3
+  Node 2 IP     (e.g. 10.10.0.1): 10.10.0.3
+  Node 2 user   (macOS username on that machine): yuvrajsingh3
+
+  Node 3 alias  (or press Enter to finish): ↵
+```
+
+The generated `~/.ssh/config` block looks like:
+```
+Host mini2
+    HostName 10.10.0.2
+    User yuvrajsingh2
+    IdentityFile ~/.ssh/smolcluster_key
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    ServerAliveInterval 30
+
+Host mini3
+    HostName 10.10.0.3
+    User yuvrajsingh3
+    IdentityFile ~/.ssh/smolcluster_key
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    ServerAliveInterval 30
+```
+
+### Step 2 — Full cluster bootstrap
+
+```bash
+./scripts/installations/setup.sh
+# or explicitly:
+./scripts/installations/setup.sh mini2 mini3
+```
+
+This script (parallel across all workers):
+1. Runs `installation.sh` locally (tmux, docker, colima, uv)
+2. Creates `.venv` locally and runs `uv pip install -e .`
+3. For each worker **in parallel**:
+   - Runs `installation.sh` remotely over SSH
+   - `git clone` the repo to `~/Desktop/smolcluster` (or `git pull` if it exists)
+   - Creates `.venv` and runs `uv pip install -e .`
+
+When it finishes it prints the exact `scp` commands to copy your `.env` to each worker.
+
+### Step 3 — Copy `.env` to workers
+
+```bash
+# Create .env on mini1 first:
+cat > .env <<'EOF'
+WANDB_API_KEY=your_wandb_key_here
+HF_TOKEN=your_huggingface_token_here
+EOF
+
+# Then copy to each worker:
+scp .env mini2:~/Desktop/smolcluster/
+scp .env mini3:~/Desktop/smolcluster/
+```
+
+---
+
+## Manual Prerequisites
+
+> Skip this section if you used the automated setup above.
 
 ### 1. SSH key auth to all nodes
 
@@ -136,9 +222,9 @@ uv sync
 ### 4. Install dependencies on every node
 
 ```bash
-brew install curl 
+brew install curl
 
-bash scripts/installations/installations.sh
+bash scripts/installations/installation.sh
 ```
 
 ### 3. Create `.env` in the project root

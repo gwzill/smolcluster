@@ -141,6 +141,8 @@ if [[ "$CLEANUP" == "true" ]]; then
     exit 0
 fi
 
+do_cleanup
+
 case "$ALGORITHM" in
     mp)
         TARGET_SCRIPT="$SCRIPT_DIR/model_parallelism/launch_mp_inference.sh"

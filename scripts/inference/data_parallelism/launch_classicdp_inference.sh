@@ -83,6 +83,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
     for node in "${SSH_NODES[@]}"; do
         echo "   Syncing to $node..."
         rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' \
+            --exclude '*.pt' --exclude '*.pth' --exclude '*.safetensors' \
             "$PROJECT_DIR/" "$node:$REMOTE_PROJECT_DIR/" || {
             echo "❌ Error: Failed to sync code to $node"
             exit 1
@@ -91,7 +92,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
     done
 else
     for node in "${SSH_NODES[@]}"; do
-        echo "   [DRY RUN] rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' $PROJECT_DIR/ $node:$REMOTE_PROJECT_DIR/"
+        echo "   [DRY RUN] rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' --exclude '*.pt' --exclude '*.pth' --exclude '*.safetensors' $PROJECT_DIR/ $node:$REMOTE_PROJECT_DIR/"
     done
 fi
 

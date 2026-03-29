@@ -355,6 +355,10 @@
           <option value="syncps">SyncPS — Sync Parameter Server</option>
           <option value="mp">MP — Model Parallelism</option>
           <option value="classicdp">ClassicDP — Classic Data Parallelism</option>
+          <option value="fsdp">FSDP — Fully Sharded Data Parallel</option>
+          <option value="ep">EP — Expert Parallelism</option>
+          <option value="mp_pipeline">MP Pipeline — Model Parallelism Pipeline</option>
+          <option value="edp">EDP — Elastic Data Parallelism</option>
         </select>
         <button class="abtn train" id="btn-train" onclick="startTraining()">
           <svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor"/></svg>
@@ -407,6 +411,9 @@
       <div class="log-header">
         <div class="log-title">Live Logs</div>
         <div class="log-actions">
+          <select id="log-filter" onchange="applyLogFilter()">
+            <option value="all">All workers</option>
+          </select>
           <button class="log-btn" id="autoscroll-btn" onclick="toggleAutoscroll()">autoscroll ✓</button>
           <button class="log-btn" onclick="clearLogs()">clear</button>
         </div>
@@ -429,6 +436,8 @@ let _prevNSig='', _prevTSig='', _prevCSig='';
 
 // Log terminal
 let autoscroll = true;
+let logFilterHost = 'all';
+const knownLogHosts = new Set();
 const hostColorMap = {};
 let nextColor = 0;
 const HOST_COLORS = ['hc0','hc1','hc2','hc3','hc4','hc5','hc6','hc7'];
@@ -636,17 +645,44 @@ function renderMetrics() {
 
 // ── Log terminal ──────────────────────────────────────────────────────────────
 function appendLog({ hostname, line }) {
+  // Register new hostname in filter dropdown
+  if (!knownLogHosts.has(hostname)) {
+    knownLogHosts.add(hostname);
+    const opt = document.createElement('option');
+    opt.value = hostname;
+    opt.textContent = hostname;
+    $('log-filter').appendChild(opt);
+  }
+
+  const visible = logFilterHost === 'all' || logFilterHost === hostname;
   const box = $('logbox');
   const row = document.createElement('div');
   row.className = 'logline';
+  row.dataset.host = hostname;
+  if (!visible) row.style.display = 'none';
   row.innerHTML = `<span class="loghostname ${hostColor(hostname)}">${hostname}</span><span class="logtext">${escHtml(line)}</span>`;
   box.appendChild(row);
-  // Trim to 800 lines
   while (box.children.length > 800) box.removeChild(box.firstChild);
-  if (autoscroll) box.scrollTop = box.scrollHeight;
+  if (autoscroll && visible) box.scrollTop = box.scrollHeight;
 }
 
-function clearLogs() { $('logbox').innerHTML = ''; }
+function applyLogFilter() {
+  logFilterHost = $('log-filter').value;
+  $('logbox').querySelectorAll('.logline').forEach(row => {
+    row.style.display = (logFilterHost === 'all' || row.dataset.host === logFilterHost) ? '' : 'none';
+  });
+  if (autoscroll) $('logbox').scrollTop = $('logbox').scrollHeight;
+}
+
+function clearLogs() {
+  $('logbox').innerHTML = '';
+  knownLogHosts.clear();
+  const sel = $('log-filter');
+  while (sel.children.length > 1) sel.removeChild(sel.lastChild);
+  logFilterHost = 'all';
+  sel.value = 'all';
+}
+
 function toggleAutoscroll() {
   autoscroll = !autoscroll;
   $('autoscroll-btn').textContent = autoscroll ? 'autoscroll ✓' : 'autoscroll ✗';
@@ -668,9 +704,13 @@ async function removeNode(h) { await fetch(`/api/nodes/${h}/deselect`, {method:'
 
 async function startTraining() {
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
-  const r = await fetch('/api/training/start', {
+  const algo  = $('algo-sel').value;
+  const hosts = Object.keys(state.selected);
+  // Auto-pick lowest-rank node as server/coordinator
+  const srv   = hosts.reduce((a, b) => state.selected[a].rank <= state.selected[b].rank ? a : b);
+  const r = await fetch('/api/training/launch', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ algorithm: $('algo-sel').value }),
+    body: JSON.stringify({ algorithm: algo, server_hostname: srv }),
   });
   if (!r.ok) alert(`Error: ${(await r.json()).detail}`);
 }
@@ -780,18 +820,19 @@ function getLayout() {
   for (const [h,v] of Object.entries(state.selected)) all[h] = {...v, running:false};
   for (const [h,v] of Object.entries(state.running))  all[h] = {...v, running:true};
 
+  const algo = _activeAlgo || $('algo-sel').value;
+  const hasServer = !['classicdp','fsdp','ep','mp_pipeline'].includes(algo);
+  // edp and syncps/mp have a dedicated server node — hasServer stays true for them
+
   let server = null; const workers = [];
   for (const [h, info] of Object.entries(all)) {
-    if (info.rank === 0 || info.role === 'server') server = {h, ...info};
+    if (hasServer && (info.rank === 0 || info.role === 'server')) server = {h, ...info};
     else workers.push({h, ...info});
   }
   workers.sort((a,b)=>a.rank-b.rank);
 
-  const algo = _activeAlgo || $('algo-sel').value;
-  const hasServer = !['classicdp','fsdp','ep','mp_pipeline'].includes(algo);
-
   const sx = W/2, sy = H * 0.22;
-  const wy = H * 0.74;
+  const wy = hasServer ? H * 0.74 : H * 0.5;
   const nw = workers.length;
   const sp = nw > 1 ? Math.min(155, (W - 100) / (nw-1)) : 0;
   const wx0 = W/2 - (nw-1)*sp/2;
@@ -951,34 +992,55 @@ function draw(ts) {
   if (server) {
     workers.forEach(w => drawConn(server.x, server.y, w.x, w.y, isActive && w.running));
   } else if (workers.length >= 2) {
-    // classicdp: star from rank-0
+    // flat (classicdp): star from rank-0 at same level
     const r0 = workers[0];
     workers.slice(1).forEach(w =>
       drawConn(r0.x, r0.y, w.x, w.y, isActive && r0.running && w.running));
   }
 
-  // ── TRAINING particles (gradients up / weights down) ──────────────────────
-  if (isTraining && server && ts - spawnTs > 380) {
-    workers.filter(w => w.running).forEach(w => {
-      particles.push({sx:w.x,sy:w.y, ex:server.x,ey:server.y, cpOff:-20,
-                      t:0, speed:0.007+Math.random()*.004, col:'26,158,99', sz:4});
-      particles.push({sx:server.x,sy:server.y, ex:w.x,ey:w.y, cpOff:+20,
-                      t:0.2+Math.random()*.15, speed:0.006+Math.random()*.004, col:'208,106,47', sz:3.5});
+  // ── TRAINING packets — activations/gradients as glowing data balls ───────────
+  const coord = server || (workers.length ? workers[0] : null);
+  const peers  = server ? workers : workers.slice(1);
+  if (isTraining && coord && ts - spawnTs > 420) {
+    peers.filter(w => w.running).forEach(w => {
+      // Activations / gradients → coord (green)
+      particles.push({sx:w.x, sy:w.y, ex:coord.x, ey:coord.y, cpOff:-22,
+                      t:0, speed:0.018+Math.random()*.005, col:'26,158,99', sz:6});
+      // Weight updates → worker (amber)
+      particles.push({sx:coord.x, sy:coord.y, ex:w.x, ey:w.y, cpOff:+22,
+                      t:-(0.018*14), speed:0.016+Math.random()*.005, col:'208,106,47', sz:5.5});
     });
     spawnTs = ts;
   }
   if (!isTraining) particles = [];
   particles = particles.filter(p => { p.t += p.speed; return p.t < 1; });
   particles.forEach(p => {
+    if (p.t <= 0) return;
     const cpx = (p.sx+p.ex)/2 + p.cpOff, cpy = (p.sy+p.ey)/2;
-    const {x,y} = bp(p.t, p.sx,p.sy, cpx,cpy, p.ex,p.ey);
-    const fade = Math.min(1, Math.sin(p.t * Math.PI) * 1.5);
+    const {x, y} = bp(p.t, p.sx, p.sy, cpx, cpy, p.ex, p.ey);
+    const fade   = Math.min(1, Math.sin(p.t * Math.PI) * 1.7);
+
+    // Outer glow
+    CTX.save();
+    CTX.shadowBlur  = 20;
+    CTX.shadowColor = `rgba(${p.col},0.95)`;
     CTX.beginPath(); CTX.arc(x, y, p.sz, 0, Math.PI*2);
     CTX.fillStyle = `rgba(${p.col},${fade.toFixed(2)})`; CTX.fill();
-    const tT = Math.max(0, p.t - 0.05);
-    const {x:tx, y:ty} = bp(tT, p.sx,p.sy, cpx,cpy, p.ex,p.ey);
-    CTX.beginPath(); CTX.arc(tx, ty, p.sz*.5, 0, Math.PI*2);
-    CTX.fillStyle = `rgba(${p.col},${(fade*.35).toFixed(2)})`; CTX.fill();
+    CTX.restore();
+
+    // White core
+    CTX.beginPath(); CTX.arc(x, y, p.sz * 0.38, 0, Math.PI*2);
+    CTX.fillStyle = `rgba(255,255,255,${(fade * 0.9).toFixed(2)})`; CTX.fill();
+
+    // Trail
+    const tT = Math.max(0, p.t - 0.07);
+    const {x:tx, y:ty} = bp(tT, p.sx, p.sy, cpx, cpy, p.ex, p.ey);
+    CTX.save();
+    CTX.shadowBlur  = 8;
+    CTX.shadowColor = `rgba(${p.col},0.5)`;
+    CTX.beginPath(); CTX.arc(tx, ty, p.sz * 0.55, 0, Math.PI*2);
+    CTX.fillStyle = `rgba(${p.col},${(fade * 0.25).toFixed(2)})`; CTX.fill();
+    CTX.restore();
   });
 
   // ── INFERENCE particles — same pattern as chat app, dashboard glow style ────

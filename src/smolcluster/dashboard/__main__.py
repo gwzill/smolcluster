@@ -2,7 +2,7 @@
 smolcluster Dashboard entry point.
 
 Usage:
-    python -m smolcluster.dashboard                    # port 8080
+    python -m smolcluster.dashboard                    
     python -m smolcluster.dashboard --port 9090
     python -m smolcluster.dashboard --host 0.0.0.0
 """
@@ -21,7 +21,7 @@ logging.basicConfig(
 def main():
     parser = argparse.ArgumentParser(description="smolcluster visual dashboard")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
+    parser.add_argument("--port", type=int, default=9090, help="Port (default: 9090)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev mode)")
     args = parser.parse_args()
 

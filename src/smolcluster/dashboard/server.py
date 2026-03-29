@@ -120,8 +120,8 @@ async def lifespan(app: FastAPI):
     discovery    = NodeDiscovery(on_change=_on_node_change)
     node_manager = NodeManager()
     _server_hostname = socket.gethostname().removesuffix(".local")
-    _zc = await asyncio.to_thread(register_node, 8080, "server", _server_hostname)
-    logger.info(f"[dashboard] http://{_server_hostname}.local:8080")
+    _zc = await asyncio.to_thread(register_node, 9090, "server", _server_hostname)
+    logger.info(f"[dashboard] http://{_server_hostname}.local:9090")
     yield
     await node_manager.stop_all()
     discovery.close()
@@ -297,6 +297,9 @@ INFER_CONFIG_FILE = (Path(__file__).parent.parent /
 INFER_SCRIPT_FILE = (Path(__file__).parent.parent.parent.parent /
                      "scripts" / "inference" / "launch_inference.sh")
 
+TRAIN_CONFIGS_DIR = str(Path(__file__).parent.parent / "configs")
+TRAIN_SCRIPTS_DIR = str(Path(__file__).parent.parent.parent.parent / "scripts" / "training")
+
 
 @app.post("/api/inference/launch")
 async def launch_inference_script(req: InferenceLaunchRequest):
@@ -350,6 +353,56 @@ async def launch_inference_script(req: InferenceLaunchRequest):
             nodes_info       = nodes_info,
             config_path      = str(INFER_CONFIG_FILE),
             script_path      = str(INFER_SCRIPT_FILE),
+        )
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+    return {"status": "launched", "algorithm": algorithm, "server": server_hostname}
+
+
+@app.post("/api/training/launch")
+async def launch_training_script(req: InferenceLaunchRequest):
+    """Write the algorithm's cluster config YAML and run the training launch script."""
+    if not node_manager.selected:
+        raise HTTPException(400, "No nodes selected")
+
+    algorithm = req.algorithm
+    snap      = discovery.snapshot()
+
+    nodes_info: dict = {}
+    for hostname, sel in node_manager.selected.items():
+        node_ip = snap.get(hostname, {}).get("ip", "")
+        alias = (
+            _SSH_CONFIG.get(node_ip, {}).get("alias")
+            or _SSH_CONFIG.get(f"{hostname}.local", {}).get("alias")
+            or _SSH_CONFIG.get(hostname, {}).get("alias")
+            or _ssh_aliases.get(hostname)
+            or hostname
+        )
+        user = _probed.get(hostname, "")
+        nodes_info[hostname] = {
+            "ssh_alias": alias,
+            "user":      user,
+            "rank":      sel["rank"],
+            "ip":        node_ip,
+        }
+
+    if not nodes_info:
+        raise HTTPException(400, "No remote nodes selected")
+
+    server_hostname = (
+        req.server_hostname
+        if req.server_hostname and req.server_hostname in nodes_info
+        else min(nodes_info, key=lambda h: nodes_info[h]["rank"])
+    )
+
+    try:
+        await node_manager.launch_training_script(
+            algorithm       = algorithm,
+            server_hostname = server_hostname,
+            nodes_info      = nodes_info,
+            configs_dir     = TRAIN_CONFIGS_DIR,
+            scripts_dir     = TRAIN_SCRIPTS_DIR,
         )
     except ValueError as e:
         raise HTTPException(409, str(e))
