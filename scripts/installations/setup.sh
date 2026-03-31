@@ -21,6 +21,50 @@ ok()   { echo "  [setup] ✓ $*"; }
 warn() { echo "  [setup] ⚠ $*" >&2; }
 hr()   { echo ""; echo "  ────────────────────────────────────────────────"; }
 
+LOCAL_USER="$(id -un 2>/dev/null || whoami)"
+LOCAL_HOSTNAME="$(hostname 2>/dev/null || true)"
+LOCAL_HOSTNAME_SHORT="$(hostname -s 2>/dev/null || true)"
+declare -a LOCAL_NAMES=("localhost" "$LOCAL_HOSTNAME" "$LOCAL_HOSTNAME_SHORT")
+declare -a LOCAL_IPS=("127.0.0.1" "::1")
+while IFS= read -r ip; do
+    [[ -n "$ip" ]] && LOCAL_IPS+=("$ip")
+done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+
+is_local_ssh_target() {
+    local node="$1"
+    local cfg_user
+    local cfg_host
+    local name
+    local ip
+
+    cfg_user="$(ssh -G "$node" 2>/dev/null | awk '/^user / {print $2; exit}')"
+    cfg_host="$(ssh -G "$node" 2>/dev/null | awk '/^hostname / {print $2; exit}')"
+
+    # If ssh config lookup fails, fall back to alias text.
+    [[ -z "$cfg_user" ]] && cfg_user="$LOCAL_USER"
+    [[ -z "$cfg_host" ]] && cfg_host="$node"
+
+    [[ "$cfg_user" != "$LOCAL_USER" ]] && return 1
+
+    for name in "${LOCAL_NAMES[@]}"; do
+        [[ -n "$name" && "$cfg_host" == "$name" ]] && return 0
+    done
+
+    for ip in "${LOCAL_IPS[@]}"; do
+        [[ -n "$ip" && "$cfg_host" == "$ip" ]] && return 0
+    done
+
+    return 1
+}
+
+is_local_jetson() {
+    [[ -f /etc/nv_tegra_release || "$(uname -m)" == "aarch64" ]]
+}
+
+
+
+
+
 # ─── STEP 1: SSH keys ────────────────────────────────────────────────────────
 hr
 echo "  STEP 1 — SSH key"
@@ -72,6 +116,13 @@ log "Installing smolcluster (editable)..."
 uv pip install -e .
 ok "Local env ready: $PROJECT_DIR/.venv"
 
+if is_local_jetson; then
+    log "Jetson platform detected locally; applying Jetson-specific Python setup..."
+    bash "$SCRIPT_DIR/setup_jetson.sh"
+    ok "Jetson-specific Python setup complete for local node"
+fi
+
+
 # ─── STEP 5: Parallel remote setup ───────────────────────────────────────────
 hr
 echo "  STEP 4 — Remote setup on ${#WORKERS[@]} node(s) in parallel"
@@ -83,10 +134,16 @@ _setup_node() {
     local node="$1"
     local pfx="  [setup:$node]"
     local out
+    local status=0
     out="$(mktemp)"
 
-    {
+    if (
         echo "$pfx Starting..."
+
+        if is_local_ssh_target "$node"; then
+            echo "$pfx Local controller target detected — skipping remote setup"
+            exit 0
+        fi
 
         # SSH reachability check
         if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$node" "echo ok" >/dev/null 2>&1; then
@@ -96,31 +153,41 @@ _setup_node() {
 
         # ── System dependencies ────────────────────────────────────────────────
         echo "$pfx Installing system dependencies (installation.sh)..."
-        ssh -o BatchMode=yes "$node" \
-            "curl -fsSL https://raw.githubusercontent.com/YuvrajSingh-mist/smolcluster/main/scripts/installations/installation.sh | bash 2>&1" \
+        ssh -o BatchMode=yes "$node" "bash -s" < "$SCRIPT_DIR/installation.sh" \
             | sed "s|^|$pfx   |" || echo "$pfx   ⚠ installation.sh had warnings (may be non-fatal)"
 
         # ── Git clone / pull ───────────────────────────────────────────────────
         echo "$pfx Syncing repository..."
         # shellcheck disable=SC2087
-        ssh -o BatchMode=yes "$node" bash <<ENDSSH
+        if ! ssh -o BatchMode=yes "$node" bash <<ENDSSH
             export PATH="\$HOME/.cargo/bin:\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
             RDIR="$HOME/Desktop/smolcluster"
-            if [[ -d "\$RDIR/.git" ]]; then
+            if git -C "\$RDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                 echo "Repo exists — pulling..."
                 cd "\$RDIR" && git pull --ff-only 2>&1
+            elif [[ -d "\$RDIR" && -n "\$(ls -A "\$RDIR" 2>/dev/null)" ]]; then
+                echo "Directory exists but is not a git repo: \$RDIR"
+                BKP="\${RDIR}.backup.\$(date +%Y%m%d%H%M%S)"
+                mv "\$RDIR" "\$BKP"
+                echo "Backed up to: \$BKP"
+                echo "Cloning smolcluster..."
+                git clone $REPO_URL "\$RDIR" 2>&1
             else
                 echo "Cloning smolcluster..."
                 mkdir -p "\$(dirname "\$RDIR")"
                 git clone $REPO_URL "\$RDIR" 2>&1
             fi
 ENDSSH
+        then
+            echo "$pfx ✗ Repository sync failed"
+            exit 1
+        fi
         # (output already interleaved — prefix added below via sed in parent)
 
         # ── Python venv + editable install ────────────────────────────────────
         echo "$pfx Setting up Python environment..."
         # shellcheck disable=SC2087
-        ssh -o BatchMode=yes "$node" bash <<ENDSSH
+        if ! ssh -o BatchMode=yes "$node" bash <<ENDSSH
             export PATH="\$HOME/.cargo/bin:\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
             cd "$HOME/Desktop/smolcluster"
             if [[ ! -d .venv ]]; then
@@ -132,12 +199,36 @@ ENDSSH
             echo "Installing smolcluster (editable)..."
             uv pip install -e . 2>&1
 ENDSSH
+        then
+            echo "$pfx ✗ Python environment setup failed"
+            exit 1
+        fi
+
+        echo "$pfx Checking for Jetson-specific Python setup..."
+        if ! ssh -o BatchMode=yes "$node" "export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH\"; cd \"\$HOME/Desktop/smolcluster\"; if [[ -f /etc/nv_tegra_release || \"\$(uname -m)\" == \"aarch64\" ]]; then echo \"Jetson platform detected — running setup_jetson.sh...\"; PROJECT_DIR=\"\$HOME/Desktop/smolcluster\" bash -s; else echo \"Non-Jetson platform detected — keeping default Python packages.\"; fi" < "$SCRIPT_DIR/setup_jetson.sh"
+        then
+            echo "$pfx ✗ Jetson-specific Python setup failed"
+            exit 1
+        fi
+
+        echo "$pfx Verifying promtail installation..."
+        if ! ssh -o BatchMode=yes "$node" "export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH\"; command -v promtail >/dev/null 2>&1 || command -v promtail.exe >/dev/null 2>&1 || test -f /c/promtail/promtail.exe || test -f /mnt/c/promtail/promtail.exe || test -f '/c/Program Files/GrafanaLabs/Promtail/promtail.exe' || test -f 'C:\\\\promtail\\\\promtail.exe'"
+        then
+            echo "$pfx ✗ promtail not found after installation"
+            echo "$pfx   Re-run: ssh $node 'bash ~/Desktop/smolcluster/scripts/installations/installation.sh'"
+            exit 1
+        fi
 
         echo "$pfx ✓ Done"
-    } >"$out" 2>&1
+    ) >"$out" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
 
     cat "$out"
     rm -f "$out"
+    return "$status"
 }
 
 # Launch all nodes in parallel

@@ -27,6 +27,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG_FILE="$PROJECT_DIR/src/smolcluster/configs/cluster_config_edp.yaml"
 REMOTE_PROJECT_DIR="~/Desktop/smolcluster"  # Adjust if your remote path is different
 
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/node_helpers.sh"
+init_node_helpers "$CONFIG_FILE" "$PROJECT_DIR" "$REMOTE_PROJECT_DIR"
+
 # Read configuration from YAML
 NUM_WORKERS=$(yq '.num_workers' "$CONFIG_FILE")
 SERVER=$(yq '.server' "$CONFIG_FILE")
@@ -81,42 +85,67 @@ fi
 
 echo "📤 This API key will be used on all remote nodes"
 
+echo "📦 Syncing code to nodes..."
+if [[ "$DRY_RUN" != "true" ]]; then
+    for node in "${ALL_NODES[@]}"; do
+        if node_is_local "$node"; then
+            echo "   ℹ️  $node is local; skipping code sync"
+            continue
+        fi
+        echo "   Syncing to $node..."
+        rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' \
+            "$PROJECT_DIR/" "$node:$REMOTE_PROJECT_DIR/" || {
+            echo "❌ Error: Failed to sync code to $node"
+            exit 1
+        }
+        echo "   ✅ Code synced to $node"
+    done
+else
+    for node in "${ALL_NODES[@]}"; do
+        if node_is_local "$node"; then
+            echo "   [DRY RUN] $node is local; skipping code sync"
+            continue
+        fi
+        echo "   [DRY RUN] rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' $PROJECT_DIR/ $node:$REMOTE_PROJECT_DIR/"
+    done
+fi
+
 # Check SSH connectivity and remote requirements
 echo "🔗 Checking SSH connectivity and remote requirements..."
 if [[ "$DRY_RUN" != "true" ]]; then
     for node in "${ALL_NODES[@]}"; do
-        if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$node" "echo 'SSH OK'"; then
+        if ! node_check "$node"; then
             echo "❌ Error: Cannot connect to $node via SSH. Please check SSH setup."
             exit 1
         fi
         
         # Check if tmux is installed on remote node
-        if ! ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && which tmux"; then
+        if ! node_exec "$node" "which tmux"; then
             echo "❌ Error: tmux is not installed on $node. Install deps on $node with: ssh $node 'bash $REMOTE_PROJECT_DIR/scripts/installations/installation.sh'"
             exit 1
         fi
         
         # Check if uv is installed on remote node
-        if ! ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && uv --version"; then
+        if ! node_exec "$node" "uv --version"; then
             echo "❌ Error: uv is not installed on $node. Install deps on $node with: ssh $node 'bash $REMOTE_PROJECT_DIR/scripts/installations/installation.sh'"
             exit 1
         fi
         
         # Check that venv exists and sync dependencies
         echo "📦 Checking venv on $node..."
-        if ! ssh "$node" "test -f $REMOTE_PROJECT_DIR/.venv/bin/python"; then
+        if ! node_exec "$node" "test -f $REMOTE_PROJECT_DIR/.venv/bin/python"; then
             echo "⚠️  Venv not found on $node. Creating with Python 3.10..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && uv venv --python 3.10 .venv && source .venv/bin/activate && uv pip install -e ."
+            node_exec "$node" "cd $REMOTE_PROJECT_DIR && uv venv --python 3.10 .venv && source .venv/bin/activate && uv pip install -e ."
         else
             echo "✅ Venv exists on $node. Running uv sync..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && uv sync"
+            node_exec "$node" "cd $REMOTE_PROJECT_DIR && uv sync"
         fi
         
         # Special handling for Jetson devices - install CUDA-enabled PyTorch
         if [[ "$node" == *"jetson"* ]]; then
             echo "🤖 Detected Jetson device: $node"
             echo "   Installing Jetson-specific PyTorch with CUDA support..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && bash scripts/installations/setup_jetson.sh"
+            node_exec "$node" "cd $REMOTE_PROJECT_DIR && bash scripts/installations/setup_jetson.sh"
             echo "   ✅ Jetson PyTorch installation complete"
         fi
         
@@ -142,13 +171,13 @@ launch_on_node() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_file="\$HOME/${session_name}.log"
-        echo "   [DRY RUN] Would execute: ssh $node \"export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && tmux new -d -s $session_name \\\"bash -c '$command 2>&1 | tee $log_file; exec bash'\\\"\""
+        echo "   [DRY RUN] Would launch $session_name on $node"
         return 0
     fi
 
     # SSH command with tmux and logging
     log_file="\$HOME/${session_name}.log"
-    ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && tmux new -d -s $session_name \"bash -c '$command 2>&1 | tee $log_file; exec bash'\"" || {
+    node_exec "$node" "cd $REMOTE_PROJECT_DIR && tmux new -d -s $session_name \"bash -c '$command 2>&1 | tee $log_file; exec bash'\"" || {
         echo "❌ Failed to launch on $node"
         return 1
     }
@@ -159,8 +188,8 @@ launch_on_node() {
     sleep 1
     
     # Verify session exists
-    if ! ssh "$node" "tmux has-session -t $session_name 2>/dev/null"; then
-        echo "⚠️  Warning: Session $session_name on $node may have exited. Check logs: ssh $node 'tail -20 $log_file'"
+    if ! node_exec "$node" "tmux has-session -t $session_name 2>/dev/null"; then
+        echo "⚠️  Warning: Session $session_name on $node may have exited. Check logs: $(node_attach_hint "$node" "$session_name")"
     fi
 }
 
@@ -169,10 +198,10 @@ launch_on_node() {
 echo ""
 echo "🧹 Cleaning up existing sessions..."
 if [[ "$DRY_RUN" != "true" ]]; then
-    ssh "$SERVER" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && tmux kill-session -t server 2>/dev/null || true"
+    node_exec "$SERVER" "tmux kill-session -t server 2>/dev/null || true"
     for worker_node in "${WORKERS[@]}"; do
         # Kill any session that starts with "worker"
-        ssh "$worker_node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^worker' | xargs -I {} tmux kill-session -t {} 2>/dev/null || true"
+        node_exec "$worker_node" "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^worker' | xargs -I {} tmux kill-session -t {} 2>/dev/null || true"
     done
     echo "✅ Cleanup complete"
 else
@@ -203,7 +232,7 @@ echo ""
 echo "🎉 Launch complete!"
 echo ""
 echo "📊 Check status:"
-echo "   ssh $SERVER 'tmux ls'"
-echo "   ssh $SERVER 'tmux attach -t server'"
+echo "   $(node_list_hint "$SERVER")"
+echo "   $(node_attach_hint "$SERVER" "server")"
 echo ""
 echo "📈 Monitor training at: https://wandb.ai"

@@ -13,12 +13,12 @@ def ensure_logging_infrastructure():
     """
     # Check if we're on the controller (has docker-compose file)
     project_root = Path(__file__).parent.parent.parent.parent
+    cluster_log_dir = project_root / "logging" / "cluster-logs"
     docker_compose_path = project_root / "logging" / "docker-compose.yml"
 
     if not docker_compose_path.exists():
         # Not on controller, just create log directory
-        log_dir = Path("/tmp/smolcluster-logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
+        cluster_log_dir.mkdir(parents=True, exist_ok=True)
         return
 
     # On controller - check if Loki is already running
@@ -69,5 +69,4 @@ def ensure_logging_infrastructure():
         print(f"⚠️  Could not start logging infrastructure: {e}")
 
     # Create log directory anyway
-    log_dir = Path("/tmp/smolcluster-logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    cluster_log_dir.mkdir(parents=True, exist_ok=True)

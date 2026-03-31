@@ -1,6 +1,6 @@
 
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "=== Jetson PyTorch GPU Install Script ==="
 
@@ -38,9 +38,13 @@ pip3 uninstall -y torch torchvision torchaudio || true
 echo ""
 echo "=== Setting up project with uv ==="
 
-# Get the project directory (two levels up from this script)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Get the project directory.
+# When invoked through `bash -s` over SSH, BASH_SOURCE points to stdin, so allow
+# the caller to provide PROJECT_DIR explicitly.
+if [[ -z "${PROJECT_DIR:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
 
 echo "Project directory: $PROJECT_DIR"
 cd "$PROJECT_DIR"
@@ -50,7 +54,7 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$
 
 # Set CUDA environment variables for Jetson
 export CUDA_HOME=/usr/local/cuda
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 export PATH=$CUDA_HOME/bin:$PATH
 
 echo "CUDA environment:"
@@ -134,7 +138,7 @@ uv pip install "numpy<2"
 echo ""
 echo "=== Installation done! Verifying PyTorch CUDA ==="
 echo "Checking installed wheel info..."
-uv pipow torch | grep -E "(Name|Version|Location|Summary)"
+uv pip show torch | grep -E "(Name|Version|Location|Summary)"
 echo ""
 
 $PROJECT_DIR/.venv/bin/python3 - << 'EOF'

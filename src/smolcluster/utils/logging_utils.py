@@ -24,7 +24,7 @@ def setup_cluster_logging(
     component: str,
     rank: Optional[int] = None,
     hostname: Optional[str] = None,
-    log_dir: str = "/tmp/smolcluster-logs",
+    log_dir: Optional[str] = None,
     level: int = logging.INFO,
 ) -> None:
     """
@@ -39,14 +39,42 @@ def setup_cluster_logging(
         log_dir: Directory for log files
         level: Logging level
     """
-    # Create log directory
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    def project_log_dir() -> Path:
+        # src/smolcluster/utils/logging_utils.py -> repository root is parents[3]
+        repo_root = Path(__file__).resolve().parents[3]
+        return repo_root / "logging" / "cluster-logs"
+
+    def pick_writable_log_dir(preferred_dir: Optional[str]) -> Path:
+        """Return a writable directory for cluster logs."""
+        default_dir = project_log_dir()
+        preferred_path = Path(preferred_dir) if preferred_dir else default_dir
+
+        candidates = [
+            preferred_path,
+            default_dir,
+            Path.cwd() / "smolcluster-logs",
+        ]
+
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                probe = candidate / ".smolcluster_write_probe"
+                with probe.open("a", encoding="utf-8"):
+                    pass
+                probe.unlink(missing_ok=True)
+                return candidate
+            except OSError:
+                continue
+
+        raise OSError("Could not find a writable directory for cluster logs")
+
+    writable_log_dir = pick_writable_log_dir(log_dir)
 
     # Determine log file name
     if component == "server":
-        log_file = Path(log_dir) / f"server-{hostname or 'unknown'}.log"
+        log_file = writable_log_dir / f"server-{hostname or 'unknown'}.log"
     else:
-        log_file = Path(log_dir) / f"worker-rank{rank}-{hostname or 'unknown'}.log"
+        log_file = writable_log_dir / f"worker-rank{rank}-{hostname or 'unknown'}.log"
 
     # Check if file handler already exists for this logger
     for handler in logger.handlers:
@@ -61,7 +89,16 @@ def setup_cluster_logging(
     logger.addFilter(rank_filter)
 
     # File handler (structured for Loki)
-    file_handler = logging.FileHandler(log_file, mode="a")
+    try:
+        file_handler = logging.FileHandler(log_file, mode="a")
+    except PermissionError:
+        # If selected file becomes unwritable between probe and open, retry
+        # in repository-local fallback so logs never go to /tmp.
+        emergency_dir = pick_writable_log_dir(
+            str(Path(__file__).resolve().parents[3] / "logging" / "cluster-logs-fallback")
+        )
+        log_file = emergency_dir / log_file.name
+        file_handler = logging.FileHandler(log_file, mode="a")
     file_handler.setLevel(level)
 
     # Structured format: timestamp | level | rank:X | step:Y | message

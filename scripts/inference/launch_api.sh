@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Launch FastAPI backend and HTML frontend for inference (MP/DP)
+set -e
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,12 +83,15 @@ API_PORT=$(yq '.web_interface.api_port' "$CONFIG_FILE")
 FRONTEND_PORT=$(yq '.web_interface.frontend_port' "$CONFIG_FILE")
 
 # Update index.html with correct API_URL before launching
-# Use the machine's real hostname so browsers can actually connect.
-# 0.0.0.0 is a valid bind address but browsers block it as a destination URL.
+# Read the server IP directly from the cluster config (avoids DNS/.local resolution issues).
 HTML_FILE="$FRONTEND_DIR/index.html"
-API_HOST="$(hostname -f 2>/dev/null || hostname).local"
-# Strip any extra .local.local
-API_HOST="${API_HOST/.local.local/.local}"
+_SERVER_KEY=$(yq '.server' "$CONFIG_FILE")
+API_HOST=$(yq ".host_ip.${_SERVER_KEY}" "$CONFIG_FILE")
+if [[ -z "$API_HOST" || "$API_HOST" == "null" ]]; then
+    echo "[ERROR] Could not resolve IP for server '${_SERVER_KEY}' from $CONFIG_FILE"
+    echo "   Add '${_SERVER_KEY}' under 'host_ip:' in the config and retry."
+    exit 1
+fi
 echo "📝 Updating API URL in index.html → http://$API_HOST:$API_PORT ..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     sed -i '' "s|let API_URL = 'http://[^']*';|let API_URL = 'http://$API_HOST:$API_PORT';|g" "$HTML_FILE"
@@ -116,23 +120,56 @@ if [[ "$LAUNCH_REDIS" == "true" ]]; then
         if ! command -v docker >/dev/null 2>&1; then
             echo "[WARN]  Docker CLI not found. Skipping container startup."
             echo "   Start Redis manually and set --redis-url (default: $REDIS_URL)."
-        elif ! docker info >/dev/null 2>&1; then
-            echo "[WARN]  Docker daemon is not running/reachable. Skipping container startup."
-            echo "   Start Docker Desktop, or run Redis manually and set --redis-url."
         else
-            if docker ps --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER_NAME}$"; then
+            # Determine whether we need sudo to reach the Docker socket
+            DOCKER="docker"
+            if ! docker info >/dev/null 2>&1; then
+                if sudo docker info >/dev/null 2>&1; then
+                    echo "[INFO] Docker socket not accessible without sudo. Using sudo for Docker commands."
+                    DOCKER="sudo docker"
+                else
+                    echo "[INFO] Docker daemon is not running. Attempting to start it..."
+                    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^docker\.service'; then
+                        sudo systemctl start docker
+                        sleep 2
+                    elif command -v service >/dev/null 2>&1; then
+                        sudo service docker start
+                        sleep 2
+                    else
+                        echo "[ERROR] Cannot start Docker daemon automatically. Start it manually."
+                        exit 1
+                    fi
+                    if sudo docker info >/dev/null 2>&1; then
+                        DOCKER="sudo docker"
+                        echo "[OK] Docker daemon started."
+                    else
+                        echo "[ERROR] Docker daemon still not reachable after start attempt."
+                        echo "   Try: sudo systemctl start docker"
+                        exit 1
+                    fi
+                fi
+                # Ensure user is in docker group for future runs (no sudo needed)
+                if ! id -nG "$USER" | grep -qw docker; then
+                    echo "[INFO] Adding $USER to docker group (takes effect on next login)..."
+                    sudo usermod -aG docker "$USER" && newgrp docker
+                fi
+            fi
+
+            if $DOCKER ps --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER_NAME}$"; then
                 echo "[OK] Redis Stack container already running: $REDIS_CONTAINER_NAME"
-            elif docker ps -a --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER_NAME}$"; then
-                if docker start "$REDIS_CONTAINER_NAME" >/dev/null 2>&1; then
+            elif $DOCKER ps -a --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER_NAME}$"; then
+                if $DOCKER start "$REDIS_CONTAINER_NAME" >/dev/null 2>&1; then
                     echo "[OK] Redis Stack container started: $REDIS_CONTAINER_NAME"
                 else
                     echo "[WARN]  Failed to start existing Redis container: $REDIS_CONTAINER_NAME"
+                    exit 1
                 fi
             else
-                if docker run -d --name "$REDIS_CONTAINER_NAME" -p 6379:6379 redis/redis-stack-server:latest >/dev/null 2>&1; then
+                if $DOCKER run -d --name "$REDIS_CONTAINER_NAME" -p 6379:6379 redis/redis-stack-server:latest >/dev/null 2>&1; then
                     echo "[OK] Redis Stack container created and started: $REDIS_CONTAINER_NAME"
                 else
                     echo "[WARN]  Failed to create/start Redis Stack container: $REDIS_CONTAINER_NAME"
+                    exit 1
                 fi
             fi
         fi

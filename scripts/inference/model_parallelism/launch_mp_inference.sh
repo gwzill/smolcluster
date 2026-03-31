@@ -4,6 +4,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/logging_helpers.sh"
+
 # Load environment variables from .env
 if [[ -f "$PROJECT_DIR/.env" ]]; then
     export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
@@ -79,6 +82,24 @@ echo "📤 This API key will be used on all remote nodes"
 # Create array of nodes that need SSH (server + regular workers only, not tablets)
 SSH_NODES=("$SERVER" "${WORKERS[@]}")
 
+echo "📦 Syncing code to remote nodes"
+if [[ "$DRY_RUN" != "true" ]]; then
+    for node in "${SSH_NODES[@]}"; do
+        echo "   Syncing to $node..."
+        rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' \
+            --exclude '*.pt' --exclude '*.pth' --exclude '*.safetensors' \
+            "$PROJECT_DIR/" "$node:$REMOTE_PROJECT_DIR/" || {
+            echo "❌ Error: Failed to sync code to $node"
+            exit 1
+        }
+        echo "   ✅ Code synced to $node"
+    done
+else
+    for node in "${SSH_NODES[@]}"; do
+        echo "   [DRY RUN] rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' --exclude '*.pt' --exclude '*.pth' --exclude '*.safetensors' $PROJECT_DIR/ $node:$REMOTE_PROJECT_DIR/"
+    done
+fi
+
 # Check SSH connectivity and remote requirements
 echo "🔗 Checking SSH connectivity and remote requirements..."
 if [[ ${#TABLETS[@]} -gt 0 ]]; then
@@ -107,13 +128,13 @@ if [[ "$DRY_RUN" != "true" ]]; then
         if ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (promtail --version || promtail.exe --version || which promtail || where promtail.exe || test -f /c/promtail/promtail.exe || test -f /mnt/c/promtail/promtail.exe || test -f \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\" || test -f \"C:\\\\promtail\\\\promtail.exe\")" &>/dev/null; then
             # Kill any existing Promtail processes (cleanup old/broken instances)
             echo "🧹 $node: Cleaning up any existing Promtail processes and old logs..."
-            ssh "$node" "(pkill -f promtail || taskkill /F /IM promtail.exe 2>nul)" &>/dev/null || true
+            ssh "$node" "((pkill -f '[p]romtail' 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n pkill -f '[p]romtail' 2>/dev/null) || true); (taskkill /F /IM promtail.exe >/dev/null 2>&1 || true))" &>/dev/null || true
             
             # Delete old log files and position files for fresh start
-            ssh "$node" "rm -f /tmp/smolcluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml" &>/dev/null || true
+            ssh "$node" "rm -f $REMOTE_PROJECT_DIR/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml" &>/dev/null || true
             
             # Ensure log directory exists
-            ssh "$node" "mkdir -p /tmp/smolcluster-logs"
+            ssh "$node" "mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs"
             sleep 1
             
             # Determine config file based on node type
@@ -182,9 +203,9 @@ if [[ "$DRY_RUN" != "true" ]]; then
         # Check Promtail locally
         if command -v promtail &>/dev/null; then
             echo "🧹 LOCAL: Cleaning up any existing Promtail processes and old logs..."
-            pkill -f promtail 2>/dev/null || true
-            rm -f /tmp/smolcluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null || true
-            mkdir -p /tmp/smolcluster-logs
+            (pkill -f '[p]romtail' 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n pkill -f '[p]romtail' 2>/dev/null) || true)
+            rm -f "$PROJECT_DIR"/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null || true
+            mkdir -p "$PROJECT_DIR"/logging/cluster-logs
             sleep 1
             
             echo "🚀 LOCAL: Starting Promtail..."
@@ -239,41 +260,7 @@ if [[ ${#TABLETS[@]} -gt 0 ]]; then
 fi
 echo "All nodes: ${ALL_NODES[*]}"
 
-# Start logging infrastructure on controller (this machine)
-echo ""
-echo "📈 Starting logging infrastructure on controller..."
-if [[ -f "$PROJECT_DIR/logging/docker-compose.yml" ]]; then
-    if docker ps | grep -q loki; then
-        echo "🧹 Cleaning up old logs from Loki..."
-        # Stop Loki, remove volumes (deletes old data), then restart
-        (cd "$PROJECT_DIR/logging" && docker-compose down loki && docker volume rm logging_loki-data || true)
-        (cd "$PROJECT_DIR/logging" && docker-compose up -d loki)
-        sleep 3
-        if curl -s http://localhost:3100/ready | grep -q "ready"; then
-            echo "✅ Loki restarted with fresh database"
-        else
-            echo "⚠️  Loki may not be ready yet, but continuing..."
-        fi
-        
-        # Ensure Grafana is also running
-        if ! docker ps | grep -q grafana; then
-            (cd "$PROJECT_DIR/logging" && docker-compose up -d grafana)
-            echo "📊 Grafana UI at http://localhost:3000 (admin/admin)"
-        fi
-    else
-        echo "🚀 Starting Loki + Grafana..."
-        (cd "$PROJECT_DIR/logging" && docker-compose up -d)
-        sleep 3
-        if curl -s http://localhost:3100/ready | grep -q "ready"; then
-            echo "✅ Loki ready at http://localhost:3100"
-            echo "📊 Grafana UI at http://localhost:3000 (admin/admin)"
-        else
-            echo "⚠️  Loki may not be ready yet, but continuing..."
-        fi
-    fi
-else
-    echo "⚠️  Logging not configured (logging/docker-compose.yml not found)"
-fi
+start_logging_stack "$PROJECT_DIR"
 
 # Function to launch on a node
 launch_on_node() {

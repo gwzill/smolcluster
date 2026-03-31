@@ -154,34 +154,43 @@ except Exception as exc:
 
 class ChatRequest(BaseModel):
     """Chat request for inference.
-    
+
     For base models (causal_gpt2): use 'text' with a plain text prompt.
     For instruction-based models (Llama-Instruct): use 'messages' with chat format.
-    
-    Example for instruction-based model:
-        messages = [
-            {"role": "system", "content": "You are a helpful programming assistant."},
-            {"role": "user", "content": "Is Rust better than Python?"},
-        ]
-        request = ChatRequest(messages=messages)
-    
-    Example for base model:
-        request = ChatRequest(text="The quick brown fox")
-    
-    Example with specific worker or server:
-        request = ChatRequest(text="Hello", worker_rank=1)  # Query worker 1
-        request = ChatRequest(text="Hello", worker_rank=0)  # Query server (rank 0)
+
+    Decoding parameters (temperature, top_p, top_k, decoding_strategy) are only
+    forwarded to the inference engine when use_hf_defaults=True is explicitly set.
+    Without it, the model config (model_config_inference.yaml) drives all decoding
+    behaviour — including HF generation_config defaults when tokenizer.use_hf_defaults
+    is true in that file.
+
+    Example — plain request (model config controls decoding):
+        {"text": "The quick brown fox"}
+
+    Example — override decoding params:
+        {"text": "The quick brown fox", "use_hf_defaults": true,
+         "decoding_strategy": "top_p", "temperature": 0.7, "top_p": 0.9}
+
+    Example — instruction-based model:
+        {"messages": [{"role": "user", "content": "Is Rust better than Python?"}]}
+
+    Example — specific worker:
+        {"text": "Hello", "worker_rank": 1}
     """
-    text: Optional[str] = None  # Plain text prompt for base models
-    messages: Optional[list[dict[str, str]]] = None  # Messages for instruction-based models
-    max_tokens: Optional[int] = None  # Will use model config default
-    temperature: Optional[float] = None  # Will use model config default
-    top_p: Optional[float] = None  # Will use model config default
-    top_k: Optional[int] = None  # Will use model config default
-    decoding_strategy: Optional[str] = None  # Will use model config default
-    worker_rank: Optional[int] = None  # Specific worker/server to query (None = rank 0 server)
-    session_id: Optional[str] = "default"  # Memory session identifier
-    use_memory: bool = True  # Enable Redis vector memory retrieval
+    text: Optional[str] = None
+    messages: Optional[list[dict[str, str]]] = None
+    max_tokens: Optional[int] = None  # Always honoured; falls back to model config default
+    worker_rank: Optional[int] = None
+    session_id: Optional[str] = "default"
+    use_memory: bool = True
+
+    # Decoding overrides — only applied when use_hf_defaults=True.
+    # Leave unset (and use_hf_defaults=False) to rely entirely on model config.
+    use_hf_defaults: bool = False
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    decoding_strategy: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -478,16 +487,24 @@ async def chat(chat_request: ChatRequest, http_request: Request):
                 yield f"data: {json.dumps({'error': 'Could not connect to server', 'done': True})}\n\n"
                 return
 
-            # Send inference request to server
-            inference_request = {
+            # Send inference request to server.
+            # Decoding params are forwarded only when use_hf_defaults=True; otherwise
+            # the inference engine falls back to model config / HF generation_config.
+            inference_request: dict = {
                 "command": "inference",
-                "max_tokens": chat_request.max_tokens,
-                "temperature": chat_request.temperature,
-                "top_p": chat_request.top_p,
-                "top_k": chat_request.top_k,
-                "decoding_strategy": chat_request.decoding_strategy,
                 "worker_rank": chat_request.worker_rank if chat_request.worker_rank is not None else 0,
             }
+            if chat_request.max_tokens is not None:
+                inference_request["max_tokens"] = chat_request.max_tokens
+            if chat_request.use_hf_defaults:
+                if chat_request.decoding_strategy is not None:
+                    inference_request["decoding_strategy"] = chat_request.decoding_strategy
+                if chat_request.temperature is not None:
+                    inference_request["temperature"] = chat_request.temperature
+                if chat_request.top_p is not None:
+                    inference_request["top_p"] = chat_request.top_p
+                if chat_request.top_k is not None:
+                    inference_request["top_k"] = chat_request.top_k
             selected_worker_rank = inference_request["worker_rank"]
             
             # Add prompt or messages
@@ -619,15 +636,22 @@ async def query(query_request: ChatRequest):
     if sock is None:
         raise HTTPException(status_code=503, detail="Could not connect to server")
 
-    inference_request = {
+    # Decoding params are forwarded only when use_hf_defaults=True.
+    inference_request: dict = {
         "command": "inference",
-        "max_tokens": query_request.max_tokens,
-        "temperature": query_request.temperature,
-        "top_p": query_request.top_p,
-        "top_k": query_request.top_k,
-        "decoding_strategy": query_request.decoding_strategy,
         "worker_rank": query_request.worker_rank if query_request.worker_rank is not None else 0,
     }
+    if query_request.max_tokens is not None:
+        inference_request["max_tokens"] = query_request.max_tokens
+    if query_request.use_hf_defaults:
+        if query_request.decoding_strategy is not None:
+            inference_request["decoding_strategy"] = query_request.decoding_strategy
+        if query_request.temperature is not None:
+            inference_request["temperature"] = query_request.temperature
+        if query_request.top_p is not None:
+            inference_request["top_p"] = query_request.top_p
+        if query_request.top_k is not None:
+            inference_request["top_k"] = query_request.top_k
     selected_worker_rank = inference_request["worker_rank"]
 
     if query_request.messages:

@@ -314,6 +314,44 @@ def run_worker(
     if algorithm in ["mp_pipeline", "classicdp", "fsdp", "ep"]:
         # Pipeline topology, ClassicDP, FSDP, and EP don't use host_ip for server connection
         pass
+    elif algorithm == "syncps":
+        workers_cfg = cluster_config.get("workers", [])
+        if not isinstance(workers_cfg, list) or len(workers_cfg) == 0:
+            raise ValueError(
+                "SyncPS requires cluster_config_syncps.yaml workers[] with hostname/rank/ip entries"
+            )
+
+        worker_entry = next(
+            (
+                w
+                for w in workers_cfg
+                if w.get("hostname") == hostname and int(w.get("rank", -1)) == int(local_rank)
+            ),
+            None,
+        )
+        if worker_entry is None:
+            raise ValueError(
+                f"SyncPS worker entry not found for hostname='{hostname}', rank={local_rank}. "
+                "Define it under workers[] in cluster_config_syncps.yaml"
+            )
+
+        worker_ip = str(worker_entry.get("ip", "")).strip()
+        if not worker_ip:
+            raise ValueError(
+                f"SyncPS worker '{hostname}' rank {local_rank} is missing workers[].ip in cluster_config_syncps.yaml"
+            )
+
+        server_hostname = cluster_config["server"]
+        server_ip = str(cluster_config.get("host_ip", {}).get(server_hostname, "")).strip()
+        if not server_ip:
+            raise ValueError(
+                f"SyncPS server '{server_hostname}' is missing host_ip mapping in cluster_config_syncps.yaml"
+            )
+
+        host_ip = server_ip
+        logger.info(
+            f"SyncPS mapping -> worker={hostname} rank={local_rank} worker_ip={worker_ip} server={server_hostname} server_ip={server_ip}"
+        )
     else:
         # Require host_ip for other algorithms
         host_ip = cluster_config["host_ip"][hostname]
@@ -358,11 +396,22 @@ def run_worker(
             attn_dropout=gpt_config.get("attn_dropout", 0.1),
             dropout=gpt_config.get("dropout", 0.1),
         )
+    else:
+        model = BaseTransformer(
+            vocab_size=vocab_size,
+            max_seq_len=gpt_config["max_seq_len"],
+            model_dim=gpt_config["model_dim"],
+            num_layers=gpt_config["num_layers"],
+            num_heads=gpt_config["num_heads"],
+            ff_dim=gpt_config["ff_dim"],
+            dropout=gpt_config["dropout"],
+        )
    
     
     # For FSDP Stage 3 and EP, skip moving full model to device
     # Model sharding happens later on CPU or per-worker
     if algorithm not in ['fsdp', 'ep']:
+        
         model = model.to(device)
         logger.info(f"Model initialized on device: {device}")
 

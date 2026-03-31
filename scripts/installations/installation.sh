@@ -20,6 +20,108 @@ require_cmd() {
     fi
 }
 
+ensure_macos_cmds() {
+    local missing=()
+    local cmd
+
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    if ! command -v brew >/dev/null 2>&1; then
+        err "Homebrew is required to install missing commands on macOS: ${missing[*]}"
+        err "Install Homebrew from https://brew.sh and rerun."
+        exit 1
+    fi
+
+    log "Installing missing macOS commands: ${missing[*]}"
+    brew install "${missing[@]}"
+}
+
+install_yq_linux_fallback() {
+    local arch
+    local url
+    local tmp
+
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l) arch="arm" ;;
+        *)
+            err "Unsupported Linux architecture for yq fallback install: $arch"
+            return 1
+            ;;
+    esac
+
+    url="https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}"
+    tmp="$(mktemp)"
+
+    log "Installing yq from upstream binary (${arch})..."
+    curl -fL "$url" -o "$tmp"
+    chmod +x "$tmp"
+    sudo mv "$tmp" /usr/local/bin/yq
+}
+
+ensure_linux_cmds() {
+    local missing=()
+    local apt_missing=()
+    local cmd
+
+    require_cmd apt
+
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    log "Installing missing Linux commands: ${missing[*]}"
+    sudo apt update
+
+    for cmd in "${missing[@]}"; do
+        [[ "$cmd" == "yq" ]] || apt_missing+=("$cmd")
+    done
+
+    if [[ ${#apt_missing[@]} -gt 0 ]]; then
+        sudo apt install -y "${apt_missing[@]}"
+    fi
+
+    if printf '%s\n' "${missing[@]}" | grep -qx "yq"; then
+        if ! command -v yq >/dev/null 2>&1; then
+            if ! sudo apt install -y yq; then
+                warn "apt package 'yq' is unavailable on this distro. Falling back to binary install."
+                install_yq_linux_fallback
+            fi
+        fi
+    fi
+
+    for cmd in "${missing[@]}"; do
+        require_cmd "$cmd"
+    done
+}
+
+ensure_essential_cmds() {
+    case "$(uname -s)" in
+        Darwin)
+            ensure_macos_cmds curl yq
+            ;;
+        Linux)
+            ensure_linux_cmds curl yq
+            ;;
+        *)
+            err "Unsupported OS: $(uname -s)"
+            exit 1
+            ;;
+    esac
+}
+
 install_uv() {
     if command -v uv >/dev/null 2>&1; then
         log "uv already installed: $(command -v uv)"
@@ -27,15 +129,55 @@ install_uv() {
     fi
 
     log "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh |
+    curl -LsSf https://astral.sh/uv/install.sh | sh
 
     export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
     if ! command -v uv >/dev/null 2>&1; then
-        warn "uv installed but not found in currentell PATH."
-        warn "Add this to yourell config: export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+        warn "uv installed but not found in current PATH."
+        warn "Add this to your shell config: export PATH=\"\$HOME/.cargo/bin:\$PATH\""
     else
         log "uv installed: $(command -v uv)"
     fi
+}
+
+install_promtail_linux() {
+    if command -v promtail >/dev/null 2>&1; then
+        log "promtail already installed: $(command -v promtail)"
+        return 0
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        warn "Docker is required for promtail wrapper install, but docker is unavailable."
+        return 1
+    fi
+
+    log "Installing docker-backed promtail wrapper at /usr/local/bin/promtail"
+    sudo tee /usr/local/bin/promtail >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "promtail wrapper error: docker is required" >&2
+  exit 1
+fi
+
+exec docker run --rm --network host \
+  -v "$HOME/Desktop/smolcluster:$HOME/Desktop/smolcluster:ro" \
+  -v /tmp:/tmp \
+  -v /var/log:/var/log:ro \
+  -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  grafana/promtail:latest "$@"
+EOF
+    sudo chmod +x /usr/local/bin/promtail
+
+    if command -v promtail >/dev/null 2>&1; then
+        log "promtail wrapper installed: $(command -v promtail)"
+        return 0
+    fi
+
+    warn "promtail install attempted, but command is still unavailable"
+    return 1
 }
 
 install_macos() {
@@ -78,20 +220,60 @@ install_linux() {
     require_cmd apt
     require_cmd systemctl
 
-    log "Installing Docker, tmux, curl, redis-tools..."
+
+    log "Installing base tools (tmux, curl, certs, redis-tools, avahi)..."
     sudo apt update
-    sudo apt install -y docker.io tmux curl ca-certificates redis-tools
 
-    log "Enabling and starting Docker service"
-    sudo systemctl enable docker
-    sudo systemctl start docker
+    # Install non-Docker deps first; Docker package choice is handled separately.
+    sudo apt install -y tmux curl ca-certificates redis-tools avahi-daemon avahi-utils libnss-mdns
 
-    if id -nG "$USER" | grep -qw docker; then
-        log "User already in docker group"
+    if systemctl list-unit-files 2>/dev/null | grep -q '^avahi-daemon\.service'; then
+        log "Enabling and starting Avahi (mDNS)"
+        sudo systemctl enable avahi-daemon
+        sudo systemctl start avahi-daemon
     else
-        log "Adding user to docker group"
-        sudo usermod -aG docker "$USER"
-        warn "Group change requires re-login or: newgrp docker"
+        warn "avahi-daemon.service not found; mDNS may not be available on this system."
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        log "Docker CLI already available: $(command -v docker)"
+    elif dpkg -s containerd.io >/dev/null 2>&1 || dpkg -s docker-ce >/dev/null 2>&1; then
+        warn "Detected Docker CE/containerd.io packages; skipping docker.io to avoid conflicts."
+        warn "If Docker is not usable, install/repair Docker CE packages from Docker's official repo."
+        exit 1
+    else
+        log "Installing docker.io"
+        sudo apt install -y docker.io
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        log "Enabling and starting Docker service"
+        if systemctl list-unit-files 2>/dev/null | grep -q '^docker\.service'; then
+            sudo systemctl enable docker
+            sudo systemctl start docker
+        else
+            warn "docker.service not found; Docker may be managed differently on this system."
+        fi
+
+        if docker compose version >/dev/null 2>&1; then
+            log "docker compose plugin already available"
+        else
+            log "Installing docker compose plugin"
+            if ! sudo apt install -y docker-compose-plugin; then
+                warn "Could not install docker-compose-plugin automatically."
+                warn "Install it manually or provide legacy docker-compose binary."
+                exit 1
+            fi
+        fi
+
+        if id -nG "$USER" | grep -qw docker; then
+            log "User already in docker group"
+        else
+            log "Adding user to docker group"
+            sudo usermod -aG docker "$USER" && newgrp docker
+        fi
+    else
+        warn "Docker CLI not found after package setup; skipping Docker service/group configuration."
     fi
 
     # Jetson / NVIDIA runtime path
@@ -108,13 +290,19 @@ install_linux() {
 
     install_uv
 
+    if ! install_promtail_linux; then
+        warn "promtail installation failed; training scripts will attempt fallback install when needed."
+    fi
+
     log "Checking Docker"
-    if docker ps >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
         docker ps
-    else
-        warn "docker ps failed in currentell (likely needs re-login/newgrp)."
+    elif command -v docker >/dev/null 2>&1; then
+        warn "docker ps failed in current shell (likely needs re-login/newgrp)."
         warn "Try: newgrp docker"
         warn "Or use: sudo docker ps"
+    else
+        warn "Docker CLI is unavailable; install Docker CE or docker.io before running container workloads."
     fi
 
     if command -v redis-cli >/dev/null 2>&1; then
@@ -125,7 +313,10 @@ install_linux() {
 }
 
 main() {
+    ensure_essential_cmds
+
     require_cmd curl
+    require_cmd yq
 
     case "$(uname -s)" in
         Darwin)

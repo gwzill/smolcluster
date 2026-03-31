@@ -57,9 +57,9 @@ fi
 
 declare -a ALIASES=() IPS=() USERS=()
 while IFS= read -r line; do
-    [[ "$line" =~ ^[[:space:]]*alias:[[:space:]]*(.+)$ ]] && ALIASES+=("${BASH_REMATCH[1]}")
-    [[ "$line" =~ ^[[:space:]]*ip:[[:space:]]*(.+)$    ]] && IPS+=("${BASH_REMATCH[1]}")
-    [[ "$line" =~ ^[[:space:]]*user:[[:space:]]*(.+)$  ]] && USERS+=("${BASH_REMATCH[1]}")
+    [[ "$line" =~ ^[[:space:]]*-[[:space:]]*alias:[[:space:]]*(.+)$ ]] && ALIASES+=("${BASH_REMATCH[1]}")
+    [[ "$line" =~ ^[[:space:]]*ip:[[:space:]]*(.+)$                 ]] && IPS+=("${BASH_REMATCH[1]}")
+    [[ "$line" =~ ^[[:space:]]*user:[[:space:]]*(.+)$               ]] && USERS+=("${BASH_REMATCH[1]}")
 done < "$NODES_YAML"
 
 if [[ ${#ALIASES[@]} -eq 0 ]]; then
@@ -71,6 +71,35 @@ for (( j=0; j<${#ALIASES[@]}; j++ )); do
     log "${ALIASES[$j]}  ${IPS[$j]}  user=${USERS[$j]}"
 done
 echo ""
+
+LOCAL_USER="$(id -un 2>/dev/null || whoami)"
+LOCAL_HOSTNAME="$(hostname 2>/dev/null || true)"
+LOCAL_HOSTNAME_SHORT="$(hostname -s 2>/dev/null || true)"
+declare -a LOCAL_NAMES=("localhost" "$LOCAL_HOSTNAME" "$LOCAL_HOSTNAME_SHORT")
+declare -a LOCAL_IPS=("127.0.0.1" "::1")
+while IFS= read -r ip; do
+    [[ -n "$ip" ]] && LOCAL_IPS+=("$ip")
+done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+
+is_local_node() {
+    local alias="$1"
+    local ip="$2"
+    local user="$3"
+    local name
+    local local_ip
+
+    [[ "$user" != "$LOCAL_USER" ]] && return 1
+
+    for name in "${LOCAL_NAMES[@]}"; do
+        [[ -n "$name" && "$alias" == "$name" ]] && return 0
+    done
+
+    for local_ip in "${LOCAL_IPS[@]}"; do
+        [[ -n "$local_ip" && "$ip" == "$local_ip" ]] && return 0
+    done
+
+    return 1
+}
 
 # ─── STEP 3: Write ~/.ssh/config block ───────────────────────────────────────
 hr
@@ -124,6 +153,10 @@ for (( j=0; j<${#ALIASES[@]}; j++ )); do
     node="${ALIASES[$j]}"
     user="${USERS[$j]}"
     ip="${IPS[$j]}"
+    if is_local_node "$node" "$ip" "$user"; then
+        ok "$node: local controller node detected, skipping ssh-copy-id"
+        continue
+    fi
     log "→ $node ($user@$ip) ..."
     if ssh-copy-id -i "$KEY_PATH.pub" "$node" 2>/dev/null; then
         ok "$node: passwordless SSH enabled"
@@ -141,10 +174,17 @@ ok "Node list saved → $NODES_CACHE"
 # ─── STEP 6: Connectivity smoke test ─────────────────────────────────────────
 hr
 echo ""
-echo "  STEP 5 — Connectivity check"
+echo "  STEP 6 — Connectivity check"
 echo ""
 FAIL=0
-for node in "${ALIASES[@]}"; do
+for (( j=0; j<${#ALIASES[@]}; j++ )); do
+    node="${ALIASES[$j]}"
+    user="${USERS[$j]}"
+    ip="${IPS[$j]}"
+    if is_local_node "$node" "$ip" "$user"; then
+        ok "$node: local controller node detected"
+        continue
+    fi
     if ssh -o ConnectTimeout=6 -o BatchMode=yes "$node" "echo ok" >/dev/null 2>&1; then
         ok "$node: SSH OK"
     else

@@ -402,44 +402,83 @@ def get_generation_config_defaults(
     hf_model_name: str,
     hf_token: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
+    generation_config_source: Optional[str] = None,
 ) -> dict[str, Any]:
     """Extract generation config defaults from HuggingFace model.
-    
-    This function retrieves the model's generation_config which contains
-    default parameters like top_p, top_k, temperature, etc. These are the
-    model author's recommended generation parameters.
-    
+
+    Some model variants (mlx, GGUF, quantized forks) omit generation_config.json.
+    Pass generation_config_source to specify a fallback model to fetch from instead.
+    The candidate order is: generation_config_source → hf_model_name.
+
     Args:
         hf_model_name: HuggingFace model identifier.
         hf_token: Optional HuggingFace token.
         logger: Optional logger for status messages.
-    
+        generation_config_source: Optional alternative model to fetch generation_config
+            from (e.g. the original base model when hf_model_name is a quantized fork).
+
     Returns:
         Dictionary with keys like 'top_p', 'top_k', 'temperature', etc.
-        Returns empty dict if generation_config not available.
-
+        Returns empty dict if generation_config is not available from any source.
     """
-    try:
-        from transformers import GenerationConfig  # noqa: PLC0415
-        gen_cfg = GenerationConfig.from_pretrained(hf_model_name, token=hf_token)
-        
-        # Extract relevant generation parameters
-        result = {}
-        for param in ['top_p', 'top_k', 'temperature', 'repetition_penalty', 'do_sample']:
-            if hasattr(gen_cfg, param):
-                value = getattr(gen_cfg, param)
-                if value is not None:
-                    result[param] = value
-        
-        if logger and result:
-            logger.info(f"Loaded generation config from {hf_model_name}: {result}")
-        
-        return result
-    except Exception as e:
+    from transformers import GenerationConfig  # noqa: PLC0415
+
+    candidates = []
+    if generation_config_source:
+        candidates.append(generation_config_source)
+    candidates.append(hf_model_name)
+
+    for source in candidates:
+        is_fallback = source != hf_model_name
         if logger:
-            logger.warning(f"Could not load generation_config for {hf_model_name}: {e}")
-        
-        return {}
+            if is_fallback:
+                logger.info(
+                    "generation_config_source set to '%s' — fetching generation defaults "
+                    "from there because '%s' (the active model) does not ship a "
+                    "generation_config.json (common for mlx/GGUF/quantized forks).",
+                    source, hf_model_name,
+                )
+            else:
+                logger.info("Fetching generation config from '%s'.", source)
+        try:
+            gen_cfg = GenerationConfig.from_pretrained(source, token=hf_token)
+            result = {}
+            for param in ["top_p", "top_k", "temperature", "repetition_penalty", "do_sample"]:
+                if hasattr(gen_cfg, param):
+                    value = getattr(gen_cfg, param)
+                    if value is not None:
+                        result[param] = value
+            if result:
+                if logger:
+                    logger.info(
+                        "Using generation defaults from '%s': %s",
+                        source, result,
+                    )
+                return result
+            if logger:
+                logger.warning("'%s' has a generation_config.json but it contained no usable params.", source)
+        except Exception as e:
+            if logger:
+                logger.warning(
+                    "Could not load generation_config from '%s': %s. "
+                    "%s",
+                    source, e,
+                    (
+                        f"Set tokenizer.generation_config_source in model_config_inference.yaml "
+                        f"to point to the original base model (e.g. the non-quantized HF repo)."
+                        if not is_fallback else
+                        f"Check that '{source}' is correct and accessible."
+                    ),
+                )
+
+    if logger:
+        logger.warning(
+            "No generation_config found for '%s'. "
+            "Decoding params (temperature, top_p, top_k) must be set explicitly under "
+            "tokenizer.decoding_overrides in model_config_inference.yaml.",
+            hf_model_name,
+        )
+    return {}
 
 
 def get_effective_decoding_strategies(
@@ -471,6 +510,7 @@ def get_effective_decoding_strategies(
             model_cfg.get("hf_model_name", ""),
             hf_token=hf_token,
             logger=logger,
+            generation_config_source=tokenizer_cfg.get("generation_config_source"),
         )
 
     if use_hf_defaults and hf_defaults:

@@ -6,6 +6,9 @@ host_ip:
   macbook: "10.10.0.1"
   pi5: "192.168.50.1"
   win: "10.10.0.1"
+  jetson: "100.66.210.6"
+  jetson2: "100.74.40.7"
+  jetson3: "100.101.219.103"
 
 port: 65432
 
@@ -32,9 +35,11 @@ seed: 42
 
 # Cluster configuration
 num_workers: 2
-server: mini1  # Server hostname
+server: jetson  # Server hostname
 workers:
-  - hostname: mini2
+  - hostname: jetson2
     rank: 1
-  - hostname: mini3
+    ip: "100.74.40.7"
+  - hostname: jetson3
     rank: 2
+    ip: "100.101.219.103"

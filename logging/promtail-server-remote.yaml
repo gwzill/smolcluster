@@ -17,7 +17,7 @@ scrape_configs:
         labels:
           job: smolcluster-server
           component: server
-          __path__: /tmp/smolcluster-logs/server-*.log
+          __path__: /home/*/Desktop/smolcluster/logging/cluster-logs/server-*.log
 
     pipeline_stages:
       # Extract hostname from filename

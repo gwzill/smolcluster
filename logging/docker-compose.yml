@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   loki:
     image: grafana/loki:2.9.0
@@ -37,7 +35,7 @@ services:
     container_name: promtail
     volumes:
       - ./promtail-config.yaml:/etc/promtail/config.yml
-      - /tmp/smolcluster-logs:/tmp/smolcluster-logs
+      - ./cluster-logs:/var/smolcluster-logs
     command: -config.file=/etc/promtail/config.yml
     restart: unless-stopped
     networks:

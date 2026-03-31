@@ -45,6 +45,12 @@ dp:
     # When true: use HF tokenizer defaults and HF generation_config defaults.
     # When false: use local decoding defaults unless overrides are provided.
     use_hf_defaults: true
+
+    # Some model variants (mlx, GGUF, quantized forks) do not ship a
+    # generation_config.json. Set generation_config_source to the original
+    # base model so generation defaults are fetched from there instead.
+    generation_config_source: Qwen/Qwen2.5-0.5B-Instruct
+
     # Tokenizer-specific overrides.
     overrides:
       add_generation_prompt: true

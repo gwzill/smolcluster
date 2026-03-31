@@ -264,7 +264,7 @@ curl -N -X POST http://localhost:8080/chat \
     "worker_rank": 1,
     "max_tokens": 128,
     "session_id": "classicdp-demo-worker-1",
-    "use_memory": true
+    "use_memory": true,
   }'
 ```
 

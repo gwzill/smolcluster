@@ -24,6 +24,12 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG_FILE="$PROJECT_DIR/src/smolcluster/configs/cluster_config_mp_pipeline.yaml"
 REMOTE_PROJECT_DIR="~/Desktop/smolcluster"  # Adjust if your remote path is different
 
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/node_helpers.sh"
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/logging_helpers.sh"
+init_node_helpers "$CONFIG_FILE" "$PROJECT_DIR" "$REMOTE_PROJECT_DIR"
+
 # Read configuration from YAML
 NUM_WORKERS=$(yq '.num_workers' "$CONFIG_FILE")
 
@@ -107,6 +113,10 @@ SSH_NODES=("${WORKERS[@]}")
 echo "📦 Syncing code to remote nodes..."
 if [[ "$DRY_RUN" != "true" ]]; then
     for node in "${SSH_NODES[@]}"; do
+        if node_is_local "$node"; then
+            echo "   ℹ️  $node is local; skipping code sync"
+            continue
+        fi
         echo "   Syncing to $node..."
         rsync -az --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude '.git' --exclude 'src/data' \
             "$PROJECT_DIR/" "$node:$REMOTE_PROJECT_DIR/" || {
@@ -127,35 +137,35 @@ if [[ ${#TABLETS[@]} -gt 0 ]]; then
 fi
 if [[ "$DRY_RUN" != "true" ]]; then
     for node in "${SSH_NODES[@]}"; do
-        if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$node" "echo 'SSH OK'"; then
+        if ! node_check "$node"; then
             echo "❌ Error: Cannot connect to $node via SSH. Please check SSH setup."
             exit 1
         fi
         
         # Check if tmux is installed on remote node
-        if ! ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && which tmux"; then
+        if ! node_exec "$node" "which tmux"; then
             echo "❌ Error: tmux is not installed on $node. Install deps on $node with: ssh $node 'bash $REMOTE_PROJECT_DIR/scripts/installations/installation.sh'"
             exit 1
         fi
         
         # Check if uv is installed on remote node
-        if ! ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && uv --version"; then
+        if ! node_exec "$node" "uv --version"; then
             echo "❌ Error: uv is not installed on $node. Install deps on $node with: ssh $node 'bash $REMOTE_PROJECT_DIR/scripts/installations/installation.sh'"
             exit 1
         fi
         
         # Check if Promtail is installed on remote node
         PROMTAIL_FOUND=false
-        if ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (promtail --version || which promtail)" 2>/dev/null; then
+        if node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (promtail --version || which promtail)" 2>/dev/null; then
             PROMTAIL_FOUND=true
         fi
         
         if [[ "$PROMTAIL_FOUND" == "true" ]]; then
             # Kill any existing Promtail processes (cleanup old/broken instances)
             echo "🧹 $node: Cleaning up any existing Promtail processes and old logs..."
-            ssh "$node" "pkill -f promtail" || true
-            ssh "$node" "rm -f /tmp/smolcluster-logs/*.log 2>/dev/null; rm -f /tmp/promtail-positions.yaml /tmp/positions.yaml" || true
-            ssh "$node" "mkdir -p /tmp/smolcluster-logs"
+            node_exec "$node" "(pkill -f '[p]romtail' 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n pkill -f '[p]romtail' 2>/dev/null) || true)" || true
+            node_exec "$node" "(rm -f $REMOTE_PROJECT_DIR/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n rm -f $REMOTE_PROJECT_DIR/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null) || true)" || true
+            node_exec "$node" "mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs"
             sleep 1
             
             # All nodes are workers in mp_pipeline
@@ -163,11 +173,11 @@ if [[ "$DRY_RUN" != "true" ]]; then
             
             # Start Promtail in background
             echo "🚀 $node: Starting Promtail..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && nohup promtail -config.file=\$HOME/Desktop/smolcluster/$config_file > /tmp/promtail.log 2>&1 </dev/null &" &
+            node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && nohup promtail -config.file=\$HOME/Desktop/smolcluster/$config_file > /tmp/promtail.log 2>&1 </dev/null &" &
             sleep 2
             
             # Check if Promtail is running
-            if ssh "$node" "pgrep -f promtail"; then
+            if node_exec "$node" "pgrep -f promtail"; then
                 echo "✅ $node: Promtail started successfully"
             else
                 echo "⚠️  $node: Promtail may not have started. Check /tmp/promtail.log on $node"
@@ -179,19 +189,19 @@ if [[ "$DRY_RUN" != "true" ]]; then
         
         # Check that venv exists and sync dependencies
         echo "📦 Checking venv on $node..."
-        if ! ssh "$node" "test -f $REMOTE_PROJECT_DIR/.venv/bin/python"; then
+        if ! node_exec "$node" "test -f $REMOTE_PROJECT_DIR/.venv/bin/python"; then
             echo "⚠️  Venv not found on $node. Creating with Python 3.10..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && uv venv --python 3.10 .venv && source .venv/bin/activate && uv pip install -e ."
+            node_exec "$node" "cd $REMOTE_PROJECT_DIR && uv venv --python 3.10 .venv && source .venv/bin/activate && uv pip install -e ."
         else
             echo "✅ Venv exists on $node. Running uv sync..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && uv sync"
+            node_exec "$node" "cd $REMOTE_PROJECT_DIR && uv sync"
         fi
         
         # Special handling for Jetson devices - install CUDA-enabled PyTorch
         if [[ "$node" == *"jetson"* ]]; then
             echo "🤖 Detected Jetson device: $node"
             echo "   Installing Jetson-specific PyTorch with CUDA support..."
-            ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && bash scripts/installations/setup_jetson.sh"
+            node_exec "$node" "cd $REMOTE_PROJECT_DIR && bash scripts/installations/setup_jetson.sh"
             echo "   ✅ Jetson PyTorch installation complete"
         fi
         
@@ -209,41 +219,7 @@ if [[ ${#TABLETS[@]} -gt 0 ]]; then
 fi
 echo "All nodes: ${ALL_NODES[*]}"
 
-# Start logging infrastructure on controller (this machine)
-echo ""
-echo "📈 Starting logging infrastructure on controller..."
-if [[ -f "$PROJECT_DIR/logging/docker-compose.yml" ]]; then
-    if docker ps | grep -q loki; then
-        echo "🧹 Cleaning up old logs from Loki..."
-        # Stop Loki, remove volumes (deletes old data), then restart
-        (cd "$PROJECT_DIR/logging" && docker-compose down loki && docker volume rm logging_loki-data || true)
-        (cd "$PROJECT_DIR/logging" && docker-compose up -d loki)
-        sleep 3
-        if curl -s http://localhost:3100/ready | grep -q "ready"; then
-            echo "✅ Loki restarted with fresh database"
-        else
-            echo "⚠️  Loki may not be ready yet, but continuing..."
-        fi
-        
-        # Ensure Grafana is also running
-        if ! docker ps | grep -q grafana; then
-            (cd "$PROJECT_DIR/logging" && docker-compose up -d grafana)
-            echo "📊 Grafana UI at http://localhost:3000 (admin/admin)"
-        fi
-    else
-        echo "🚀 Starting Loki + Grafana..."
-        (cd "$PROJECT_DIR/logging" && docker-compose up -d)
-        sleep 3
-        if curl -s http://localhost:3100/ready | grep -q "ready"; then
-            echo "✅ Loki ready at http://localhost:3100"
-            echo "📊 Grafana UI at http://localhost:3000 (admin/admin)"
-        else
-            echo "⚠️  Loki may not be ready yet, but continuing..."
-        fi
-    fi
-else
-    echo "⚠️  Logging not configured (logging/docker-compose.yml not found)"
-fi
+start_logging_stack "$PROJECT_DIR"
 
 # Function to launch on a node
 launch_on_node() {
@@ -259,7 +235,7 @@ launch_on_node() {
     fi
 
     log_file="\$HOME/${session_name}.log"
-    ssh "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd $REMOTE_PROJECT_DIR && tmux new -d -s $session_name \"bash -c '$command 2>&1 | tee $log_file; exec bash'\"" || {
+    node_exec "$node" "cd $REMOTE_PROJECT_DIR && tmux new -d -s $session_name \"bash -c '$command 2>&1 | tee $log_file; exec bash'\"" || {
         echo "❌ Failed to launch on $node"
         return 1
     }
@@ -269,8 +245,8 @@ launch_on_node() {
     sleep 1
     
     # Verify session exists
-    if ! ssh "$node" "tmux has-session -t $session_name"; then
-        echo "⚠️  Warning: Session $session_name on $node may have exited. Check logs: ssh $node 'tail -20 $log_file'"
+    if ! node_exec "$node" "tmux has-session -t $session_name"; then
+        echo "⚠️  Warning: Session $session_name on $node may have exited. Check logs: $(node_attach_hint "$node" "$session_name")"
     fi
 }
 
@@ -280,7 +256,7 @@ echo ""
 echo "🧹 Cleaning up existing sessions..."
 if [[ "$DRY_RUN" != "true" ]]; then
     for worker_node in "${WORKERS[@]}"; do
-        ssh "$worker_node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && tmux list-sessions -F '#{session_name}' | grep -E '^mp_pipeline_worker' | xargs -I {} tmux kill-session -t {} || true"
+        node_exec "$worker_node" "tmux list-sessions -F '#{session_name}' | grep -E '^mp_pipeline_worker' | xargs -I {} tmux kill-session -t {} || true"
     done
     echo "✅ Cleanup complete"
 else
@@ -363,9 +339,9 @@ echo "🎉 Launch complete!"
 echo ""
 echo "📊 Check status:"
 for worker_node in "${WORKERS[@]}"; do
-    echo "   ssh $worker_node 'tmux ls'"
+    echo "   $(node_list_hint "$worker_node")"
 done
-echo "   ssh ${WORKERS[0]} 'tmux attach -t mp_pipeline_worker0'"
+echo "   $(node_attach_hint "${WORKERS[0]}" "mp_pipeline_worker0")"
 echo ""
 echo "📈 Monitor training at: https://wandb.ai"
 echo "📊 View centralized logs at: http://localhost:3000 (Grafana)"

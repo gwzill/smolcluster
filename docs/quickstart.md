@@ -6,8 +6,15 @@ This guide covers:
 1. Cluster architecture overview
 2. **SyncPS DP Inference** smoke test
 3. **SyncPS DP Training** smoke test
+4. **Interactive dashboard** for monitoring and job control
+---
+
+## Cluster Architecture
+
+<img src="../images/architecture.png" alt="Mac Mini Cluster Architecture" width="100%">
 
 ---
+
 
 ## Choose Your Setup Path
 
@@ -21,6 +28,7 @@ After completing the matching setup section, continue to:
 - [Automated Setup (recommended)](#automated-setup-recommended)
 - [Smoke Test 1 — SyncPS DP Inference](#smoke-test-1--syncps-dp-inference)
 - [Smoke Test 2 — SyncPS DP Training](#smoke-test-2--syncps-dp-training)
+- [Dashboard](#dashboard)
 
 ---
 
@@ -110,6 +118,7 @@ Only continue to inference/training after ping and SSH are both stable.
 
 > **Supported hardware**: Jetson AGX Orin, Orin NX, Orin Nano — all running **JetPack 6** (CUDA 12.6).
 > The original Jetson Nano (JetPack 4/5) is **not** supported by these scripts.
+> **Tested note**: This setup has been tested on Jetson Orin Nano with the current JetPack 6.x stack only.
 
 These steps replace the "Initial Mac Mini Networking Setup" above when one or more workers are Jetsons connected via a home router (instead of Thunderbolt direct-cable).
 
@@ -203,6 +212,11 @@ nodes:
 
 ### 6. On controller — run SSH setup and cluster bootstrap
 
+> **Caution**
+> If a node is a Jetson, `./scripts/installations/setup.sh` may invoke `scripts/installations/setup_jetson.sh` on that machine as part of the automated bootstrap.
+> That Jetson setup path assumes passwordless `sudo` is already configured and will install/replace Python and PyTorch-related packages.
+> If you do not want that automated behavior, read [`scripts/installations/setup_jetson.sh`](../scripts/installations/setup_jetson.sh) first and run the setup steps manually instead.
+
 ```bash
 # Distribute SSH keys and write ~/.ssh/config
 ./scripts/installations/setup_ssh.sh
@@ -213,48 +227,32 @@ nodes:
 
 ---
 
-### 7. On controller — install Jetson-specific PyTorch on each worker
 
-`setup.sh` installs the default PyTorch from `pyproject.toml`. For Jetsons you need the
-JetPack 6 wheel (CUDA 12.6) instead. Run `setup_jetson.sh` remotely on each worker:
+### 7. Copy `.env` to workers
 
-```bash
-ssh jetson1 "cd ~/Desktop/smolcluster && bash scripts/installations/setup_jetson.sh"
-ssh jetson2 "cd ~/Desktop/smolcluster && bash scripts/installations/setup_jetson.sh"
-```
-
-This script:
-- Installs system deps (`python3.10`, `libopenblas`, `libopenmpi-dev`)
-- Runs `uv sync` to set up the venv
-- Replaces default PyTorch with `torch==2.8.0` + `torchvision==0.23.0` from `pypi.jetson-ai-lab.io/jp6/cu126`
-- Verifies CUDA is accessible and prints device info
-
-At the end you should see:
-
-```
-CUDA available: True
-CUDA device: Orin
-```
-
----
-
-### 8. Copy `.env` to workers
+Finally, `scp` the `.env` to each worker so they can log to W&B and access Hugging Face/wandb during training/inference:
 
 ```bash
 cat > .env <<'EOF'
 WANDB_API_KEY=your_wandb_key_here
 HF_TOKEN=your_huggingface_token_here
 EOF
+```
 
-scp .env jetson1:~/Desktop/smolcluster/
-scp .env jetson2:~/Desktop/smolcluster/
+Or read the aliases directly from `~/.config/smolcluster/nodes.yaml`:
+
+```bash
+awk '/^[[:space:]]*-[[:space:]]*alias:/ {print $3}' ~/.config/smolcluster/nodes.yaml |
+while read -r node; do
+  scp .env "$node:~/Desktop/smolcluster/"
+done
 ```
 
 ---
 
-### 9. Update cluster config YAMLs
+### 8. Update cluster config YAMLs
 
-Open [`src/smolcluster/configs/cluster_config_syncps.yaml`](src/smolcluster/configs/cluster_config_syncps.yaml) and replace the `host_ip` and `workers` blocks with your actual aliases and IPs:
+Open [`src/smolcluster/configs/cluster_config_syncps.yaml`](../src/smolcluster/configs/cluster_config_syncps.yaml) and replace the `host_ip` and `workers` blocks with your actual aliases and IPs:
 
 ```yaml
 host_ip:
@@ -273,110 +271,10 @@ workers:
     rank: 2
 ```
 
-Do the same for [`src/smolcluster/configs/inference/cluster_config_inference.yaml`](src/smolcluster/configs/inference/cluster_config_inference.yaml).
+Do the same for [`src/smolcluster/configs/inference/cluster_config_inference.yaml`](../src/smolcluster/configs/inference/cluster_config_inference.yaml).
 
 Then proceed to the **Smoke Test** sections below.
 
----
-
-## Cluster Architecture
-
-<img src="../images/architecture.png" alt="Mac Mini Cluster Architecture" width="100%">
-
-| Node | Hostname | IP | Role |
-|------|----------|----|------|
-| Mac Mini 1 | `mini1` | `10.10.0.1` | Server (rank 0) |
-| Mac Mini 2 | `mini2` | `10.10.0.2` | Worker (rank 1) |
-| Mac Mini 3 | `mini3` | `10.10.0.3` | Worker (rank 2) |
-
-Nodes are connected via **Thunderbolt fabric** (40 Gbps point-to-point). Static IPs are assigned on the `10.10.0.x` subnet. In SyncPS, `mini1` acts as the parameter server: workers compute gradients on their local replica, push gradients to the server, which aggregates and broadcasts updated weights each step.
-
----
-
-## Automated Setup (recommended)
-
-Two scripts handle everything end-to-end. Run them once from `mini1` after completing the Thunderbolt networking steps above.
-
-### Step 1 — SSH keys and config
-
-> **Prerequisite**: complete the Thunderbolt IP assignment (above) **and** fill
-> `~/.config/smolcluster/nodes.yaml` before running this script.
-
-```bash
-./scripts/installations/setup_ssh.sh
-```
-
-This script:
-- Generates `~/.ssh/smolcluster_key` (ed25519) if it doesn't exist
-- Prompts you for each worker's alias, IP, and username
-- Writes a clean `~/.ssh/config` block (between `# BEGIN smolcluster` / `# END smolcluster` markers so it's safe to re-run)
-- Pushes the public key to every worker via `ssh-copy-id`
-- Smoke-tests SSH connectivity to all nodes
-- Saves the node list to `~/.config/smolcluster/nodes` for use by `setup.sh`
-
-Example session:
-```
-  Node 1 alias  (e.g. mini1, or press Enter to finish): mini2
-  Node 1 IP     (e.g. 10.10.0.1): 10.10.0.2
-  Node 1 user   (macOS username on that machine): yuvrajsingh2
-
-  Node 2 alias  (e.g. mini2, or press Enter to finish): mini3
-  Node 2 IP     (e.g. 10.10.0.1): 10.10.0.3
-  Node 2 user   (macOS username on that machine): yuvrajsingh3
-
-  Node 3 alias  (or press Enter to finish): ↵
-```
-
-The generated `~/.ssh/config` block looks like:
-```
-Host mini2
-    HostName 10.10.0.2
-    User yuvrajsingh2
-    IdentityFile ~/.ssh/smolcluster_key
-    IdentitiesOnly yes
-    StrictHostKeyChecking no
-    ServerAliveInterval 30
-
-Host mini3
-    HostName 10.10.0.3
-    User yuvrajsingh3
-    IdentityFile ~/.ssh/smolcluster_key
-    IdentitiesOnly yes
-    StrictHostKeyChecking no
-    ServerAliveInterval 30
-```
-
-### Step 2 — Full cluster bootstrap
-
-```bash
-./scripts/installations/setup.sh
-# or explicitly:
-./scripts/installations/setup.sh mini2 mini3
-```
-
-This script (parallel across all workers):
-1. Runs `installation.sh` locally (tmux, docker, colima, uv)
-2. Creates `.venv` locally and runs `uv pip install -e .`
-3. For each worker **in parallel**:
-   - Runs `installation.sh` remotely over SSH
-   - `git clone` the repo to `~/Desktop/smolcluster` (or `git pull` if it exists)
-   - Creates `.venv` and runs `uv pip install -e .`
-
-When it finishes it prints the exact `scp` commands to copy your `.env` to each worker.
-
-### Step 3 — Copy `.env` to workers
-
-```bash
-# Create .env on mini1 first:
-cat > .env <<'EOF'
-WANDB_API_KEY=your_wandb_key_here
-HF_TOKEN=your_huggingface_token_here
-EOF
-
-# Then copy to each worker:
-scp .env mini2:~/Desktop/smolcluster/
-scp .env mini3:~/Desktop/smolcluster/
-```
 
 ---
 
@@ -555,6 +453,39 @@ tmux kill-session -t syncps_server
 tmux kill-session -t syncps_worker_1
 tmux kill-session -t syncps_worker_2
 ```
+
+---
+
+## Dashboard
+
+Run the smolcluster dashboard to monitor nodes and launch/stop jobs from a web UI.
+
+### Step 1: Start dashboard
+
+From the repo root:
+
+```bash
+./.venv/bin/python -m smolcluster.dashboard
+```
+
+Default bind is `0.0.0.0:9090`.
+
+### Step 2: Open dashboard
+
+- On the same machine: `http://localhost:9090`
+- On your LAN (from another device): `http://<controller-ip>:9090`
+
+If mDNS is working on your network, the terminal may also print a `.local` URL.
+
+### Step 3: Optional custom host/port
+
+```bash
+./.venv/bin/python -m smolcluster.dashboard --host 0.0.0.0 --port 9090
+```
+
+### Step 4: Stop dashboard
+
+Press `Ctrl+C` in the dashboard terminal.
 
 ---
 

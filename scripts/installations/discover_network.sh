@@ -178,10 +178,10 @@ echo ""
 echo "    nodes:"
 echo "      - alias: jetson1"
 echo "        ip: 192.168.50.101"
-echo "        user: nvidia"
+echo "        user: nvidia (echo \$whoami)"
 echo "      - alias: node2"
 echo "        ip: 192.168.50.102"
-echo "        user: youruser"
+echo "        user: youruser (echo \$whoami)"
 echo ""
 
 # ─── NEXT STEPS ──────────────────────────────────────────────────────────────

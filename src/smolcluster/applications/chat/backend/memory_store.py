@@ -85,6 +85,10 @@ class RedisVectorMemory:
     def _session_tag(self, session_id: str) -> str:
         return re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
 
+    def _escape_tag_value(self, tag: str) -> str:
+        """Escape special characters in a RediSearch TAG filter value."""
+        return re.sub(r"([-,.<>{}\[\]\"':;!@#$%^&*()+= ~|])", r"\\\1", tag)
+
     def _embed(self, text: str) -> np.ndarray:
         vec = np.zeros(self.embedding_dim, dtype=np.float32)
         if not text:
@@ -178,7 +182,7 @@ class RedisVectorMemory:
         tag = self._session_tag(session_id)
         query_vec = self._embed(query).astype(np.float32).tobytes()
         redis_query = (
-            f"(@session:{{{tag}}})=>[KNN {k} @vector $vec AS score]"
+            f"(@session:{{{self._escape_tag_value(tag)}}})=>[KNN {k} @vector $vec AS score]"
         )
 
         try:
