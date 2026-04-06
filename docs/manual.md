@@ -25,7 +25,6 @@ Use the path that matches your hardware before continuing:
 
 After completing the matching setup section, continue to:
 
-- [Automated Setup (recommended)](#automated-setup-recommended)
 - [Smoke Test 1 — SyncPS DP Inference](#smoke-test-1--syncps-dp-inference)
 - [Smoke Test 2 — SyncPS DP Training](#smoke-test-2--syncps-dp-training)
 - [Dashboard](#dashboard)

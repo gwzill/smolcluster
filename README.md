@@ -16,7 +16,9 @@ A distributed deep learning library for training neural networks across heteroge
 
 ## Quick Start
 
-Refer to [QUICKSTART.md](docs/quickstart.md) for a step-by-step guide to set up and run your first distributed training job with SmolCluster.
+Refer to the [quickstart](https://www.smolcluster.com/quickstart.html) guide for an quick and easy setup or [MANUAL.md](docs/manual.md) for a step-by-step manual setup guide and to run your first training/inference algorithm on smolcluster.
+
+
 
 ## Cluster Topology
 

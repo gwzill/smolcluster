@@ -46,20 +46,15 @@ metrics_log_interval: 50  # Log network metrics every N steps
 
 
 # Cluster configuration
-num_workers: 2
-total_num_nodes: 3
+num_workers: 1
+total_num_nodes: 2
 
-server: mini2    # Server hostname (rank 0 for SyncPS inference)
+server: mini3    # Server hostname (rank 0 for SyncPS inference)
 workers:
   regular:
-  - hostname: mini3
-    user: yuvrajsingh3
-    rank: 1
-    ip: 10.10.0.3
-    port: 65432
   - hostname: macmini1
     user: macmini1
-    rank: 2
+    rank: 1
     ip: "10.10.0.1"
     port: 65432
   tablets: []
