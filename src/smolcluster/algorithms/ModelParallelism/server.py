@@ -22,6 +22,8 @@ from smolcluster.utils.common_utils import (
 from smolcluster.utils.layers import get_model_per_node
 from smolcluster.utils.logging_utils import setup_cluster_logging
 
+_last_grad_ts = [0.0]  # tracks wall-clock of last grad exchange for animation speed
+
 
 def get_tensor_size_mb(tensor: torch.Tensor) -> float:
     """Calculate tensor size in megabytes."""
@@ -572,6 +574,17 @@ def run_modelparallelism_server(
                     grad_size_mb = get_tensor_size_mb(recv_grads)
                     gradient_recv_times.append(grad_recv_time)
                     gradient_recv_sizes.append(grad_size_mb)
+                    # Signal the dashboard: touch ping + write real step interval for animation speed.
+                    _now = time.time()
+                    try:
+                        Path("/tmp/smolcluster_grad_ping").touch()
+                        if _last_grad_ts[0] > 0:
+                            Path("/tmp/smolcluster_grad_interval_ms").write_text(
+                                f"{(_now - _last_grad_ts[0]) * 1000:.1f}"
+                            )
+                    except Exception:
+                        pass
+                    _last_grad_ts[0] = _now
 
                     tqdm.write(
                         f"[LEADER] [Step {step}] Received gradients forwarded to server from worker {from_rank} for {to_rank}"

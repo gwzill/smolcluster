@@ -13,27 +13,6 @@ source "$PROJECT_DIR/scripts/lib/node_helpers.sh"
 source "$PROJECT_DIR/scripts/lib/logging_helpers.sh"
 init_node_helpers "$CONFIG_FILE" "$PROJECT_DIR" "$REMOTE_PROJECT_DIR"
 
-ensure_promtail_on_node() {
-    local node="$1"
-
-    if node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (command -v promtail >/dev/null 2>&1 || command -v promtail.exe >/dev/null 2>&1 || test -f /c/promtail/promtail.exe || test -f /mnt/c/promtail/promtail.exe || test -f \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\" || test -f \"C:\\\\promtail\\\\promtail.exe\")" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    echo "⚠️  $node: Promtail not found. Installing dependencies (includes promtail)..."
-    if node_is_local "$node"; then
-        if ! bash "$PROJECT_DIR/scripts/installations/installation.sh"; then
-            return 1
-        fi
-    else
-        if ! ssh -o BatchMode=yes "$node" "bash -s" < "$PROJECT_DIR/scripts/installations/installation.sh"; then
-            return 1
-        fi
-    fi
-
-    node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (command -v promtail >/dev/null 2>&1 || command -v promtail.exe >/dev/null 2>&1 || test -f /c/promtail/promtail.exe || test -f /mnt/c/promtail/promtail.exe || test -f \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\" || test -f \"C:\\\\promtail\\\\promtail.exe\")" >/dev/null 2>&1
-}
-
 ensure_wandb_login_on_node() {
     local node="$1"
 
@@ -56,6 +35,9 @@ if [[ -n "$WANDB_API_TOKEN" && -z "$WANDB_API_KEY" ]]; then
 elif [[ -n "$WANDB_API_KEY" && -z "$WANDB_API_TOKEN" ]]; then
     export WANDB_API_TOKEN="$WANDB_API_KEY"
 fi
+
+# Log in to HuggingFace Hub so gated models (e.g. Llama-2) can be downloaded.
+ensure_hf_login_local
 
 # Set CUDA environment variables (for Jetson and other CUDA devices)
 if [[ -n "$CUDA_HOME" ]]; then
@@ -197,42 +179,8 @@ if [[ "$DRY_RUN" != "true" ]]; then
             exit 1
         fi
         
-        # Ensure Promtail exists (cross-platform), install on-demand if missing.
-        if ensure_promtail_on_node "$node"; then
-            # Kill any existing Promtail processes (cleanup old/broken instances)
-            echo "🧹 $node: Cleaning up any existing Promtail processes and old logs..."
-            node_exec "$node" "((pkill -f '[p]romtail' 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n pkill -f '[p]romtail' 2>/dev/null) || true); (taskkill /F /IM promtail.exe >/dev/null 2>&1 || true))" || true
-            
-            # Delete old log files and position files for fresh start
-            node_exec "$node" "(rm -f $CLUSTER_LOG_DIR_REMOTE/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n rm -f $CLUSTER_LOG_DIR_REMOTE/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null) || true)" || true
-            
-            # Ensure log directory exists
-            node_exec "$node" "mkdir -p $CLUSTER_LOG_DIR_REMOTE"
-            sleep 1
-            
-            # Determine config file based on node type
-            if [[ "$node" == "$SERVER" ]]; then
-                config_file="logging/promtail-server-remote.yaml"
-            else
-                config_file="logging/promtail-worker-remote.yaml"
-            fi
-            
-            # Start Promtail in background (auto-detect path)
-            echo "🚀 $node: Starting Promtail..."
-            node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && PROMTAIL_CMD=\$(command -v promtail || command -v promtail.exe || (test -f /c/promtail/promtail.exe && echo /c/promtail/promtail.exe) || (test -f /mnt/c/promtail/promtail.exe && echo /mnt/c/promtail/promtail.exe) || (test -f \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\" && echo \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\") || (test -f \"C:\\\\promtail\\\\promtail.exe\" && echo \"C:\\\\promtail\\\\promtail.exe\") || echo promtail.exe) && nohup \$PROMTAIL_CMD -config.file=\$HOME/Desktop/smolcluster/$config_file > /tmp/promtail.log 2>&1 </dev/null &" &
-            sleep 2
-            
-            # Check if Promtail is running
-            if node_exec "$node" "pgrep -f promtail || tasklist /FI 'IMAGENAME eq promtail.exe' 2>nul | findstr promtail"; then
-                echo "✅ $node: Promtail started successfully"
-            else
-                echo "⚠️  $node: Promtail may not have started. Check /tmp/promtail.log on $node"
-            fi
-        else
-            echo "❌ Error: Promtail install/check failed on $node."
-            echo "   Check installer output above and retry."
-            exit 1
-        fi
+        # Ensure log directory exists on remote node
+        node_exec "$node" "mkdir -p $CLUSTER_LOG_DIR_REMOTE"
         
         # Check that venv exists and sync dependencies
         echo "📦 Checking venv on $node..."
@@ -297,6 +245,16 @@ launch_on_node() {
     }
 
     echo "✅ Launched $session_name on $node (logs: $log_file)"
+    
+    # Stream remote log to controller so the dashboard log tab can show it.
+    if ! node_is_local "$node"; then
+        local _local_log="$PROJECT_DIR/logging/cluster-logs/${session_name}__${node}.log"
+        rm -f "$_local_log"
+        ( sleep 2; ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+            -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+            "$node" "tail -F $log_file 2>/dev/null" >> "$_local_log" 2>/dev/null ) &
+        disown $! 2>/dev/null || true
+    fi
     
     # Give tmux a moment to start
     sleep 1

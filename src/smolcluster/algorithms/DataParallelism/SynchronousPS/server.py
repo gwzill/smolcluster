@@ -30,6 +30,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("[SERVER]")
 
+_last_grad_ts = [0.0]  # tracks wall-clock of last grad exchange for animation speed
+
 
 def evaluate(
     device: torch.device,
@@ -385,6 +387,16 @@ def run_syncps_server(
                     f"[Step {step}  / {num_epochs * len(train_loader)}] Applying averaged gradients to server model"
                 )
                 set_gradients(grads_reduced, model)
+
+                # Compute gradient norm BEFORE the optimizer step, from the averaged grads
+                _grad_norm = math.sqrt(
+                    sum(
+                        p.grad.detach().norm(2).item() ** 2
+                        for p in model.parameters()
+                        if p.grad is not None
+                    )
+                )
+
                 optimizer.step()
 
                 logger.info(
@@ -398,6 +410,17 @@ def run_syncps_server(
                     logger.info(
                         f"[Step {step}] Sent updated model weights to worker at {_worker_addr}"
                     )
+                # Signal the dashboard: touch ping + write real step interval for animation speed.
+                _now = time.time()
+                try:
+                    Path("/tmp/smolcluster_grad_ping").touch()
+                    if _last_grad_ts[0] > 0:
+                        Path("/tmp/smolcluster_grad_interval_ms").write_text(
+                            f"{(_now - _last_grad_ts[0]) * 1000:.1f}"
+                        )
+                except Exception:
+                    pass
+                _last_grad_ts[0] = _now
 
                 # Cleanup
                 grads_received.pop(step, None)
@@ -408,15 +431,15 @@ def run_syncps_server(
                     f"No gradients received for step {step}. Skipping grad update."
                 )
                 del leader_grads
+                _grad_norm = 0.0
 
-            # Log gradient norms if tracking enabled
+            # Log per-layer gradient norms if tracking enabled
             if track_gradients:
                 for name, param in model.named_parameters():
                     if param.grad is not None:
-                        grad_norm = torch.norm(param.grad.detach(), 2).item()
                         wandb.log(
                             {
-                                f"gradients/layer_{name}": grad_norm,
+                                f"gradients/layer_{name}": torch.norm(param.grad.detach(), 2).item(),
                                 "step": step,
                                 "epoch": epoch + 1,
                             }
@@ -424,37 +447,56 @@ def run_syncps_server(
 
             # Log training metrics
 
-            # Calculate tokens/sec
+            # Calculate tokens/sec across all participants (server + workers all compute in parallel)
             batch_time = time.time() - batch_start_time
-            tokens_processed = data.size(0) * data.size(1)
+            tokens_processed = data.size(0) * data.size(1) * world_size
             tok_per_sec = tokens_processed / batch_time if batch_time > 0 else 0
+
+            _lr = optimizer.param_groups[0]["lr"]
 
             wandb.log(
                 {
                     "step": step,
                     "epoch": epoch + 1,
-                    "lr": optimizer.param_groups[0]["lr"],
+                    "lr": _lr,
+                    "grad_norm": _grad_norm,
                     "batch_size": batch_size,
-                    "throughput/server_tok_per_sec": tok_per_sec,
+                    "throughput/total_tok_per_sec": tok_per_sec,
                 }
+            )
+
+            # Emit a single parseable line for the dashboard log parser
+            logger.info(
+                f"[Metrics] Step: {step} / {num_epochs * len(train_loader)} | "
+                f"Loss: {round(total_loss / (batch_idx + 1), 4):.4f} | "
+                f"Gradient Norm: {_grad_norm:.4f} | "
+                f"LR: {_lr:.4e} | "
+                f"Throughput: {tok_per_sec:.0f} tok/s"
             )
 
             # Write live metrics for the dashboard
             try:
+                _safe_gn = round(_grad_norm, 4) if math.isfinite(_grad_norm) else 'NaN'
                 _metrics = {
                     "step": step,
                     "total_steps": num_epochs * len(train_loader),
                     "loss": round(total_loss / (batch_idx + 1), 4),
                     "throughput": round(tok_per_sec, 1),
+                    "grad_norm": _safe_gn,
+                    "lr": _lr,
                     "algorithm": "syncps",
                     "running": True,
                 }
                 Path("/tmp/smolcluster_metrics.json").write_text(json.dumps(_metrics))
+                # Emit a machine-readable metrics line so the SSH-tailed log stream
+                # carries metrics to the dashboard controller even when the server
+                # runs on a different machine than the dashboard.
+                print(f"[SMOL_METRICS] {json.dumps(_metrics)}", flush=True)
             except Exception:
                 pass
 
             # Update progress bar
-            batch_pbar.set_postfix({"lr": f"{optimizer.param_groups[0]['lr']:.2e}", "step": step, "tok/s": f"{tok_per_sec:.0f}"})
+            batch_pbar.set_postfix({"lr": f"{_lr:.2e}", "grad_norm": f"{_grad_norm:.3f}", "step": step, "tok/s": f"{tok_per_sec:.0f}"})
 
             # Evaluation
             if step % eval_steps == 0:

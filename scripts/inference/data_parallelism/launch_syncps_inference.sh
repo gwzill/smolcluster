@@ -164,31 +164,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
             exit 1
         fi
 
-        if ssh $SSH_OPTS "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (promtail --version || promtail.exe --version || which promtail || where promtail.exe || test -f /c/promtail/promtail.exe || test -f /mnt/c/promtail/promtail.exe || test -f \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\" || test -f \"C:\\\\promtail\\\\promtail.exe\")" &>/dev/null; then
-            echo "🧹 $node: Cleaning up any existing Promtail processes and old logs..."
-            ssh $SSH_OPTS "$node" "((pkill -f '[p]romtail' 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n pkill -f '[p]romtail' 2>/dev/null) || true); (taskkill /F /IM promtail.exe >/dev/null 2>&1 || true))" &>/dev/null || true
-            ssh $SSH_OPTS "$node" "rm -f $REMOTE_PROJECT_DIR/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml" &>/dev/null || true
-            ssh $SSH_OPTS "$node" "mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs"
-            sleep 1
-
-            if [[ "$node" == "$SERVER" ]]; then
-                config_file="logging/promtail-server-remote.yaml"
-            else
-                config_file="logging/promtail-worker-remote.yaml"
-            fi
-
-            echo "🚀 $node: Starting Promtail..."
-            ssh $SSH_OPTS "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && PROMTAIL_CMD=\$(command -v promtail || command -v promtail.exe || (test -f /c/promtail/promtail.exe && echo /c/promtail/promtail.exe) || (test -f /mnt/c/promtail/promtail.exe && echo /mnt/c/promtail/promtail.exe) || (test -f \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\" && echo \"/c/Program Files/GrafanaLabs/Promtail/promtail.exe\") || (test -f \"C:\\\\promtail\\\\promtail.exe\" && echo \"C:\\\\promtail\\\\promtail.exe\") || echo promtail.exe) && nohup \$PROMTAIL_CMD -config.file=\$HOME/Desktop/smolcluster/$config_file > /tmp/promtail.log 2>&1 </dev/null &" &
-            sleep 2
-
-            if ssh $SSH_OPTS "$node" "pgrep -f promtail || tasklist /FI 'IMAGENAME eq promtail.exe' 2>nul | findstr promtail"; then
-                echo "✅ $node: Promtail started successfully"
-            else
-                echo "⚠️  $node: Promtail may not have started. Check /tmp/promtail.log on $node"
-            fi
-        else
-            echo "⚠️  Warning: Promtail not found on $node. Centralized logging will not work."
-        fi
+        ssh $SSH_OPTS "$node" "mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs" &>/dev/null || true
     done
 
     echo "🔧 Checking local requirements on launch machine..."
@@ -288,6 +264,13 @@ action_ssh() {
     fi
 
     ssh $SSH_OPTS "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs && cd $REMOTE_PROJECT_DIR && tmux kill-session -t $session_name 2>/dev/null || true; tmux new -d -s $session_name \"bash -c '$command 2>&1 | tee $log_file; exec bash'\""
+    # Stream remote log to controller so the dashboard log tab can show it.
+    local _local_log="$PROJECT_DIR/logging/cluster-logs/${session_name}__${node}.log"
+    rm -f "$_local_log"
+    ( sleep 2; ssh $SSH_OPTS \
+        -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+        "$node" "tail -F $log_file 2>/dev/null" >> "$_local_log" 2>/dev/null ) &
+    disown $! 2>/dev/null || true
 }
 
 action_local() {

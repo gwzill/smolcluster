@@ -243,7 +243,7 @@ def run_modelparallelism_worker(
     logger.info(f"Loading worker's share of model layers (rank {local_rank})...")
 
     model_layers, out_layers = get_model_per_node(
-        model, num_nodes=num_nodes, local_rank=local_rank, total_layers=num_layers
+        model, num_nodes=num_nodes, local_rank=local_rank - 1, total_layers=num_layers
     )
 
     model_layers = model_layers.to(device)

@@ -44,6 +44,7 @@ def safe_wandb_log(data, step=None, commit=True):
 lock = threading.Lock()
 
 model_version = 0  # Track global model version for elastic training
+_last_grad_ts = [0.0]  # tracks wall-clock of last grad exchange for animation speed
 
 workers = {}
 workers_grads_received = {}  # Single dict for all worker gradients: {(rank, recv_step, worker_version): grads}
@@ -278,6 +279,17 @@ def process_message(
             else:
                 workers[rank]["send_queue"].put((weights, model_version))
                 logger.info(f"Weights queued for worker {rank}")
+            # Signal the dashboard: touch ping + write real step interval for animation speed.
+            _now = time.time()
+            try:
+                Path("/tmp/smolcluster_grad_ping").touch()
+                if _last_grad_ts[0] > 0:
+                    Path("/tmp/smolcluster_grad_interval_ms").write_text(
+                        f"{(_now - _last_grad_ts[0]) * 1000:.1f}"
+                    )
+            except Exception:
+                pass
+            _last_grad_ts[0] = _now
         else:
             logger.warning(
                 f"Worker rank {rank} not found in workers dict, cannot send weights"

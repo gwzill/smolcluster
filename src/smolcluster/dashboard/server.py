@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import redis.asyncio as aioredis
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -49,6 +50,9 @@ METRICS_FILE   = Path("/tmp/smolcluster_metrics.json")
 INFERENCE_FILE = Path("/tmp/smolcluster_inference.json")
 TOKEN_PING     = Path("/tmp/smolcluster_token_ping")
 LAST_TOKEN     = Path("/tmp/smolcluster_last_token")
+TOKEN_INTERVAL = Path("/tmp/smolcluster_token_interval_ms")  # real inter-token ms written by api.py
+GRAD_PING      = Path("/tmp/smolcluster_grad_ping")
+GRAD_INTERVAL  = Path("/tmp/smolcluster_grad_interval_ms")   # real inter-step ms written by training servers
 LOKI_BASE_URL  = os.environ.get("SMOLCLUSTER_LOKI_URL", "http://127.0.0.1:3100")
 CLUSTER_LOG_DIR = Path(__file__).resolve().parents[3] / "logging" / "cluster-logs"
 
@@ -193,22 +197,61 @@ node_manager:     NodeManager
 _zc               = None
 _server_hostname: str = ""
 _loop:            asyncio.AbstractEventLoop = None
+_redis:           aioredis.Redis = None
+
+REDIS_URL = os.environ.get("SMOLCLUSTER_REDIS_URL", "redis://127.0.0.1:6379/0")
+
+
+def _ensure_redis_running():
+    """Start Redis via redis-server if not already reachable."""
+    import subprocess as _sp
+    try:
+        _sp.run(["redis-cli", "-u", REDIS_URL.replace("/0",""), "ping"],
+                capture_output=True, timeout=1)
+        return
+    except Exception:
+        pass
+    _sp.run(["redis-server", "--daemonize", "yes",
+             "--logfile", "/tmp/redis.log", "--bind", "127.0.0.1"],
+            capture_output=True, timeout=10)
+    import time as _t; _t.sleep(1)
+
+
+async def _restore_state_from_redis():
+    """Restore selected nodes from Redis so the dashboard survives restarts."""
+    try:
+        selected = await _redis.hgetall("smolcluster:selected")
+        for hostname, val in selected.items():
+            data = json.loads(val)
+            node_manager.selected[hostname] = data
+            logger.info(f"[dashboard] Redis restored: {hostname} rank={data.get('rank')}")
+    except Exception as exc:
+        logger.warning(f"[dashboard] Redis restore skipped: {exc}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global discovery, node_manager, _zc, _server_hostname, _loop
+    global discovery, node_manager, _zc, _server_hostname, _loop, _redis
     _loop = asyncio.get_running_loop()
+    _ensure_redis_running()
+    _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
     discovery    = NodeDiscovery(on_change=_on_node_change)
     node_manager = NodeManager()
     _server_hostname = socket.gethostname().removesuffix(".local")
+    await _restore_state_from_redis()
     _zc = await asyncio.to_thread(register_node, 9090, "server", _server_hostname)
     logger.info(f"[dashboard] http://{_server_hostname}.local:9090")
+    broadcast_task = asyncio.create_task(_events_broadcaster())
+    log_task       = asyncio.create_task(_log_broadcaster())
     yield
+    broadcast_task.cancel()
+    log_task.cancel()
+    await asyncio.gather(broadcast_task, log_task, return_exceptions=True)
     await node_manager.stop_all()
     discovery.close()
     if _zc:
         await asyncio.to_thread(_zc.close)
+    await _redis.aclose()
 
 
 app = FastAPI(title="smolcluster Dashboard", lifespan=lifespan)
@@ -286,10 +329,8 @@ async def _probe_and_store(hostname: str, info: dict):
             # Cross-subnet node with no alias: can't probe without config
             _probed[hostname] = ""
             return
-        m = re.search(r'macmini(\d+)', hostname, re.IGNORECASE)
-        guess = f"yuvrajsingh{m[1]}" if m else ""
         target = None
-        for attempt in ([guess] if guess else []) + [""]:
+        for attempt in [""]:
             user = await NodeManager.probe_username(hostname, attempt)
             if user:
                 _probed[hostname] = user
@@ -440,12 +481,17 @@ async def probe_node(hostname: str, ssh_user: str = ""):
 @app.post("/api/nodes/{hostname}/select")
 async def select_node(hostname: str, req: SelectRequest):
     rank = await node_manager.select(hostname, req.ssh_user, req.rank)
+    if _redis:
+        await _redis.hset("smolcluster:selected", hostname,
+                          json.dumps({"rank": rank, "ssh_user": req.ssh_user}))
     return {"status": "selected", "rank": rank}
 
 
 @app.post("/api/nodes/{hostname}/deselect")
 async def deselect_node(hostname: str):
     await node_manager.deselect(hostname)
+    if _redis:
+        await _redis.hdel("smolcluster:selected", hostname)
     return {"status": "deselected"}
 
 
@@ -461,8 +507,17 @@ async def start_training(req: StartRequest):
 
 
 @app.post("/api/training/stop")
-async def stop_training():
+async def stop_training_endpoint():
+    log_label = next(iter(node_manager.processes), _server_hostname)
     await node_manager.stop_training()
+    # Clear stale metric and ping files so a fresh page load or new run starts clean.
+    METRICS_FILE.unlink(missing_ok=True)
+    GRAD_PING.unlink(missing_ok=True)
+    GRAD_INTERVAL.unlink(missing_ok=True)
+    # Also run inference cleanup in case sessions from a previous inference run survived
+    asyncio.create_task(
+        node_manager.run_cleanup_script(str(INFER_SCRIPT_FILE), log_label)
+    )
     return {"status": "stopped"}
 
 
@@ -479,8 +534,15 @@ async def start_inference():
 
 @app.post("/api/inference/stop")
 async def stop_inference():
+    log_label = next(iter(node_manager.processes), _server_hostname)
     await node_manager.stop_training()
     INFERENCE_FILE.unlink(missing_ok=True)
+    TOKEN_PING.unlink(missing_ok=True)
+    TOKEN_INTERVAL.unlink(missing_ok=True)
+    # Run launch_inference.sh --cleanup and stream its output to the log buffer
+    asyncio.create_task(
+        node_manager.run_cleanup_script(str(INFER_SCRIPT_FILE), log_label)
+    )
     return {"status": "stopped"}
 
 
@@ -629,27 +691,103 @@ async def get_training():
     return _read_json(METRICS_FILE)
 
 
-# ── SSE: state (1 Hz) ──────────────────────────────────────────────────────────
-@app.get("/api/events")
-async def sse_events():
-    async def gen():
-        while True:
+# ── Background broadcasters (started in lifespan) ─────────────────────────────
+async def _events_broadcaster():
+    """Compute the full events payload once per second and cache in Redis.
+    All SSE /api/events connections read from the cache key instead of
+    recomputing independently — one compute, N readers."""
+    while True:
+        try:
+            _running_procs = node_manager.snapshot_processes()
+            _training_active = any(
+                p.get("role") in ("server", "worker", "training_launcher")
+                for p in _running_procs.values()
+            )
             payload = json.dumps({
                 "nodes": {
                     "discovered":  {_server_hostname: _self_node(), **discovery.snapshot()},
                     "selected":    node_manager.snapshot_selected(),
-                    "running":     node_manager.snapshot_processes(),
+                    "running":     _running_procs,
                     "usernames":   dict(_probed),
                     "ssh_aliases": _ssh_aliases_snapshot(),
                     "node_os":     dict(_node_os),
                 },
-                "training":     _read_json(METRICS_FILE),
+                # Don't serve stale METRICS_FILE when no training processes are running.
+                # A fresh page load after a stopped run must not show old values.
+                "training":     _read_json(METRICS_FILE) if _training_active else None,
                 "connectivity": _read_json(INFERENCE_FILE),
-                "token_ts":     TOKEN_PING.stat().st_mtime if TOKEN_PING.exists() else 0,
-                "token_text":   LAST_TOKEN.read_text() if LAST_TOKEN.exists() else "",
+                "token_ts":          TOKEN_PING.stat().st_mtime if TOKEN_PING.exists() else 0,
+                "token_text":        LAST_TOKEN.read_text() if LAST_TOKEN.exists() else "",
+                "token_interval_ms": float(TOKEN_INTERVAL.read_text()) if TOKEN_INTERVAL.exists() else None,
+                "grad_ts":           GRAD_PING.stat().st_mtime  if GRAD_PING.exists()  else 0,
+                "grad_interval_ms":  float(GRAD_INTERVAL.read_text()) if GRAD_INTERVAL.exists() else None,
             })
-            yield f"data: {payload}\n\n"
-            await asyncio.sleep(1)
+            await _redis.set("smolcluster:events", payload, ex=5)
+        except Exception as exc:
+            logger.debug(f"[dashboard] events broadcaster: {exc}")
+        await asyncio.sleep(0.2)  # 5 Hz — fast enough to track token-by-token inference
+
+
+# Log markers emitted by training algorithms to signal a gradient/weight exchange.
+_GRAD_SIGNAL_MARKERS = ("[SMOL_METRICS]", "[SMOL_PING]")
+
+
+async def _log_broadcaster():
+    """Drain NodeManager in-memory logs + cluster log files into a Redis Stream.
+    All SSE /api/logs connections consume via XREAD BLOCK — no file reads per
+    connection and no history replay on reconnect."""
+    last_seq = 0
+    local_log_offsets: dict[str, int] = {}
+    while True:
+        try:
+            lines = node_manager.logs_since(last_seq)
+            local_lines = _read_local_cluster_logs(local_log_offsets)
+            merged: list[dict] = []
+            if lines:
+                last_seq = lines[-1]["seq"]
+                merged.extend(lines)
+            merged.extend(local_lines)
+            if merged:
+                pipe = _redis.pipeline()
+                for entry in merged:
+                    # Touch GRAD_PING on the dashboard machine whenever any node
+                    # logs a gradient/weight exchange marker.  This is the only
+                    # reliable path for remote workers (FSDP, EP) whose /tmp/ is
+                    # not on the controller machine.
+                    if any(m in entry.get("line", "") for m in _GRAD_SIGNAL_MARKERS):
+                        try: GRAD_PING.touch()
+                        except Exception: pass
+                    pipe.xadd(
+                        "smolcluster:logs",
+                        {
+                            "hostname": entry.get("hostname", ""),
+                            "line":     entry.get("line", ""),
+                            "session":  entry.get("session", ""),
+                            "ts":       str(entry.get("ts") or ""),
+                        },
+                        maxlen=2000,
+                        approximate=True,
+                    )
+                await pipe.execute()
+        except Exception as exc:
+            logger.debug(f"[dashboard] log broadcaster: {exc}")
+        await asyncio.sleep(0.35)
+
+
+# ── SSE: state (1 Hz) ──────────────────────────────────────────────────────────
+@app.get("/api/events")
+async def sse_events(request: Request):
+    async def gen():
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                raw = await _redis.get("smolcluster:events")
+                if raw:
+                    yield f"data: {raw}\n\n"
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)  # 6-7 Hz for snappy token / packet updates
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
@@ -710,6 +848,9 @@ def _parse_cluster_log_path(path: Path) -> tuple[str, str]:
     return stem, stem
 
 
+_LOCAL_LOG_MAX_LINES_PER_TICK = 200
+
+
 def _read_local_cluster_logs(offsets: dict[str, int]) -> list[dict]:
     """Tail controller-local tmux logs so local workers stream even without Promtail."""
     if not CLUSTER_LOG_DIR.exists():
@@ -728,8 +869,15 @@ def _read_local_cluster_logs(offsets: dict[str, int]) -> list[dict]:
         except OSError:
             continue
 
-        offset = offsets.get(key, 0)
+        if key not in offsets:
+            # New SSE connection: start at EOF so we only stream new lines,
+            # never replay the full history (can be many MB).
+            offsets[key] = size
+            continue
+
+        offset = offsets[key]
         if offset > size:
+            # File was rotated/truncated — restart from beginning.
             offset = 0
 
         session, hostname = _parse_cluster_log_path(path)
@@ -744,7 +892,11 @@ def _read_local_cluster_logs(offsets: dict[str, int]) -> list[dict]:
                         "session": session,
                         "ts": time.time(),
                     })
-                offsets[key] = handle.tell()
+                    if len(logs) >= _LOCAL_LOG_MAX_LINES_PER_TICK:
+                        offsets[key] = handle.tell()
+                        break
+                else:
+                    offsets[key] = handle.tell()
         except OSError:
             continue
 
@@ -752,26 +904,32 @@ def _read_local_cluster_logs(offsets: dict[str, int]) -> list[dict]:
 
 
 @app.get("/api/logs")
-async def sse_logs():
+async def sse_logs(request: Request):
     async def gen():
-        last_seq = 0
-        last_loki_ns = time.time_ns()
-        local_log_offsets: dict[str, int] = {}
+        last_id = "$"   # only new log entries from this connection onward
         while True:
-            lines = node_manager.logs_since(last_seq)
-            loki_lines, last_loki_ns = await _fetch_loki_logs(last_loki_ns)
-            local_lines = _read_local_cluster_logs(local_log_offsets)
-            merged: list[dict] = []
-            if lines:
-                last_seq = lines[-1]["seq"]
-                merged.extend(lines)
-            if loki_lines:
-                merged.extend(loki_lines)
-            if local_lines:
-                merged.extend(local_lines)
-            if merged:
-                yield f"data: {json.dumps(merged)}\n\n"
-            await asyncio.sleep(0.35)
+            if await request.is_disconnected():
+                break
+            try:
+                results = await _redis.xread(
+                    {"smolcluster:logs": last_id}, count=200, block=400
+                )
+                if results:
+                    _, entries = results[0]
+                    if entries:
+                        last_id = entries[-1][0]
+                        lines = [
+                            {
+                                "hostname": e["hostname"],
+                                "line":     e["line"],
+                                "session":  e.get("session", ""),
+                                "ts":       float(e.get("ts") or 0),
+                            }
+                            for _, e in entries
+                        ]
+                        yield f"data: {json.dumps(lines)}\n\n"
+            except Exception:
+                await asyncio.sleep(0.35)
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
@@ -841,45 +999,21 @@ async def _run_tcp_checks(selected: dict, snap: dict):
 
 # ── Chat proxy (forward to inference API) ──────────────────────────────────────
 def _get_inference_api_url() -> Optional[str]:
-    """Get the inference API URL from cluster config."""
-    # Try multiple paths for the config file
-    possible_paths = [
-        Path("/tmp/smolcluster_inference_config.yaml"),
-        Path.cwd() / "configs" / "inference" / "cluster_config_inference.yaml",
-        Path(__file__).parent.parent / "configs" / "inference" / "cluster_config_inference.yaml",
-    ]
-    
-    config_path = None
-    for path in possible_paths:
-        if path.exists():
-            config_path = path
-            break
-    
-    if not config_path:
-        return None
-    
-    try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-        if not config:
-            return None
-        
-        server_hostname = config.get("server", "")
-        if not server_hostname:
-            return None
-        
-        # Try to get the server's IP/hostname
-        host_mapping = config.get("host_ip", {})
-        host = host_mapping.get(server_hostname, server_hostname)
-        
-        # Get API port
-        web_interface = config.get("web_interface", {})
-        api_port = web_interface.get("api_port", 8000)
-        
-        return f"http://{host}:{api_port}"
-    except Exception as e:
-        logger.warning(f"Could not get inference API URL: {e}")
-        return None
+    """Get the inference API URL.
+
+    launch_api.sh always runs on the dashboard machine (localhost), so we only
+    need the port from the config — never a remote IP.
+    """
+    config_path = Path(__file__).parent.parent / "configs" / "inference" / "cluster_config_inference.yaml"
+    api_port = 8080  # default from cluster_config_inference.yaml
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f) or {}
+            api_port = config.get("web_interface", {}).get("api_port", api_port)
+        except Exception as e:
+            logger.warning(f"Could not read inference config for api_port: {e}")
+    return f"http://127.0.0.1:{api_port}"
 
 
 @app.post("/chat")
@@ -932,6 +1066,9 @@ def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        raw = json.loads(path.read_text())
+        # Replace any non-finite floats (NaN/Inf) so json.dumps stays valid JSON
+        return {k: (None if isinstance(v, float) and not (v == v and v != float("inf") and v != float("-inf")) else v)
+                for k, v in raw.items()}
     except Exception:
         return {}

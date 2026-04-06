@@ -140,46 +140,6 @@ install_uv() {
     fi
 }
 
-install_promtail_linux() {
-    if command -v promtail >/dev/null 2>&1; then
-        log "promtail already installed: $(command -v promtail)"
-        return 0
-    fi
-
-    if ! command -v docker >/dev/null 2>&1; then
-        warn "Docker is required for promtail wrapper install, but docker is unavailable."
-        return 1
-    fi
-
-    log "Installing docker-backed promtail wrapper at /usr/local/bin/promtail"
-    sudo tee /usr/local/bin/promtail >/dev/null <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "promtail wrapper error: docker is required" >&2
-  exit 1
-fi
-
-exec docker run --rm --network host \
-  -v "$HOME/Desktop/smolcluster:$HOME/Desktop/smolcluster:ro" \
-  -v /tmp:/tmp \
-  -v /var/log:/var/log:ro \
-  -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  grafana/promtail:latest "$@"
-EOF
-    sudo chmod +x /usr/local/bin/promtail
-
-    if command -v promtail >/dev/null 2>&1; then
-        log "promtail wrapper installed: $(command -v promtail)"
-        return 0
-    fi
-
-    warn "promtail install attempted, but command is still unavailable"
-    return 1
-}
-
 install_macos() {
     log "Detected macOS"
 
@@ -191,8 +151,15 @@ install_macos() {
     log "Updating Homebrew..."
     brew update
 
-    log "Installing tmux, docker, colima, redis..."
+    log "Installing tmux, docker, colima, redis, jq..."
     brew install tmux docker colima redis jq
+
+    # Enable Redis as a persistent Homebrew service
+    if command -v redis-server >/dev/null 2>&1; then
+        brew services start redis 2>/dev/null || \
+            redis-server --daemonize yes --logfile /tmp/redis.log --bind 127.0.0.1 >/dev/null 2>&1 || true
+        log "Redis started"
+    fi
 
     if ! colima status >/dev/null 2>&1; then
         log "Starting Colima..."
@@ -221,11 +188,18 @@ install_linux() {
     require_cmd systemctl
 
 
-    log "Installing base tools (tmux, curl, certs, redis-tools, avahi)..."
+    log "Installing base tools (tmux, curl, certs, redis-tools, redis-server, avahi)..."
     sudo apt update
 
     # Install non-Docker deps first; Docker package choice is handled separately.
-    sudo apt install -y tmux curl ca-certificates redis-tools avahi-daemon avahi-utils libnss-mdns
+    sudo apt install -y tmux curl ca-certificates redis-tools redis-server avahi-daemon avahi-utils libnss-mdns
+
+    # Enable and start Redis
+    if systemctl list-unit-files 2>/dev/null | grep -q '^redis'; then
+        sudo systemctl enable redis-server 2>/dev/null || sudo systemctl enable redis 2>/dev/null || true
+        sudo systemctl start redis-server 2>/dev/null || sudo systemctl start redis 2>/dev/null || true
+        log "Redis service enabled and started"
+    fi
 
     if systemctl list-unit-files 2>/dev/null | grep -q '^avahi-daemon\.service'; then
         log "Enabling and starting Avahi (mDNS)"
@@ -289,10 +263,6 @@ install_linux() {
     fi
 
     install_uv
-
-    if ! install_promtail_linux; then
-        warn "promtail installation failed; training scripts will attempt fallback install when needed."
-    fi
 
     log "Checking Docker"
     if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then

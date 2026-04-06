@@ -1195,6 +1195,10 @@ def run_ep_worker(
                 if worker_rank == num_nodes - 1 and mixtral is not None:
                     set_gradients(grads_reduced, mixtral)
                 optimizer.step()
+                # Rank-0 emits a dashboard ping via stdout so the SSH-tailed log
+                # stream carries it back to the controller machine.
+                if worker_rank == 0:
+                    print(f"[SMOL_PING] step={step}", flush=True)
 
                 logger.info(
                     f"[Step {step}] Worker {worker_rank} model updated with broadcast gradients"

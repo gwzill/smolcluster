@@ -211,14 +211,6 @@ ENDSSH
             exit 1
         fi
 
-        echo "$pfx Verifying promtail installation..."
-        if ! ssh -o BatchMode=yes "$node" "export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH\"; command -v promtail >/dev/null 2>&1 || command -v promtail.exe >/dev/null 2>&1 || test -f /c/promtail/promtail.exe || test -f /mnt/c/promtail/promtail.exe || test -f '/c/Program Files/GrafanaLabs/Promtail/promtail.exe' || test -f 'C:\\\\promtail\\\\promtail.exe'"
-        then
-            echo "$pfx ✗ promtail not found after installation"
-            echo "$pfx   Re-run: ssh $node 'bash ~/Desktop/smolcluster/scripts/installations/installation.sh'"
-            exit 1
-        fi
-
         echo "$pfx ✓ Done"
     ) >"$out" 2>&1; then
         status=0

@@ -10,12 +10,22 @@ CONFIG_FILE="$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_infer
 API_DIR="$PROJECT_DIR/src/smolcluster/applications/chat/backend"
 FRONTEND_DIR="$PROJECT_DIR/src/smolcluster/applications/chat/frontend"
 
+# Load environment variables and log in to HuggingFace Hub (for gated models).
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+    set -a; source "$PROJECT_DIR/.env"; set +a
+fi
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/node_helpers.sh"
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/logging_helpers.sh"
+NODE_HELPERS_PROJECT_DIR="$PROJECT_DIR"
+ensure_hf_login_local
+ensure_redis_running
+
 BACKEND="model_parallelism"
 INFERENCE_ALGORITHM=""
 LAUNCH_INFERENCE=true
-LAUNCH_REDIS=true
 REDIS_URL="redis://0.0.0.0:6379/0"
-REDIS_CONTAINER_NAME="smolcluster-redis"
 SESSION_PREFIX="mp"
 SERVER_HOST_OVERRIDE=""
 SERVER_PORT_OVERRIDE=""
@@ -36,10 +46,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-inference)
             LAUNCH_INFERENCE=false
-            shift
-            ;;
-        --no-redis)
-            LAUNCH_REDIS=false
             shift
             ;;
         --redis-url)
@@ -83,14 +89,44 @@ API_PORT=$(yq '.web_interface.api_port' "$CONFIG_FILE")
 FRONTEND_PORT=$(yq '.web_interface.frontend_port' "$CONFIG_FILE")
 
 # Update index.html with correct API_URL before launching
-# Read the server IP directly from the cluster config (avoids DNS/.local resolution issues).
+# Read the server IP from the cluster config; fall back to the local machine's LAN IP
+# because launch_api.sh always runs on the controller (dashboard) machine.
 HTML_FILE="$FRONTEND_DIR/index.html"
 _SERVER_KEY=$(yq '.server' "$CONFIG_FILE")
-API_HOST=$(yq ".host_ip.${_SERVER_KEY}" "$CONFIG_FILE")
+API_HOST=$(yq ".host_ip.${_SERVER_KEY}" "$CONFIG_FILE" 2>/dev/null)
 if [[ -z "$API_HOST" || "$API_HOST" == "null" ]]; then
-    echo "[ERROR] Could not resolve IP for server '${_SERVER_KEY}' from $CONFIG_FILE"
-    echo "   Add '${_SERVER_KEY}' under 'host_ip:' in the config and retry."
-    exit 1
+    # Server key not in host_ip — try to find it under the SSH alias.
+    # The mDNS hostname (e.g. "macmini1") may differ from the SSH alias ("mini1").
+    # Walk all host_ip entries and pick any that appears to be local by comparing against
+    # the machine's own interface IPs. If none match, use the first non-empty entry or
+    # the machine's primary LAN IP as a last resort.
+    _LOCAL_LAN_IP=""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        _LOCAL_LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+    else
+        _LOCAL_LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    # Try each host_ip value to see if it matches our local IPs
+    _FOUND_IP=""
+    while IFS='=' read -r _key _val; do
+        _val="${_val//[[:space:]]/}"
+        [[ -z "$_val" || "$_val" == "null" ]] && continue
+        if [[ -n "$_LOCAL_LAN_IP" && "$_val" == "$_LOCAL_LAN_IP" ]]; then
+            _FOUND_IP="$_val"
+            break
+        fi
+    done < <(yq '.host_ip | to_entries[] | .key + "=" + .value' "$CONFIG_FILE" 2>/dev/null || true)
+    if [[ -n "$_FOUND_IP" ]]; then
+        API_HOST="$_FOUND_IP"
+        echo "[INFO] Resolved API host via local IP match: $API_HOST"
+    elif [[ -n "$_LOCAL_LAN_IP" ]]; then
+        API_HOST="$_LOCAL_LAN_IP"
+        echo "[INFO] Server key '${_SERVER_KEY}' not in host_ip; using local LAN IP: $API_HOST"
+    else
+        echo "[ERROR] Could not resolve IP for server '${_SERVER_KEY}' from $CONFIG_FILE"
+        echo "   Add '${_SERVER_KEY}' under 'host_ip:' in the config and retry."
+        exit 1
+    fi
 fi
 echo "📝 Updating API URL in index.html → http://$API_HOST:$API_PORT ..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -111,84 +147,16 @@ echo "🧠 Inference algorithm: $INFERENCE_ALGORITHM"
 echo "🧠 Memory backend: redis-vector ($REDIS_URL)"
 echo "📁 Project dir: $PROJECT_DIR"
 
-if [[ "$LAUNCH_REDIS" == "true" ]]; then
-    echo ""
-    echo "🧰 Ensuring Redis Stack is running for vector memory..."
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo "   [DRY RUN] Would start container '$REDIS_CONTAINER_NAME' using redis/redis-stack-server:latest on port 6379"
+# Validate Redis reachability (Redis daemon started above via ensure_redis_running).
+if command -v redis-cli >/dev/null 2>&1; then
+    if redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
+        echo "[OK] Redis is reachable at $REDIS_URL"
     else
-        if ! command -v docker >/dev/null 2>&1; then
-            echo "[WARN]  Docker CLI not found. Skipping container startup."
-            echo "   Start Redis manually and set --redis-url (default: $REDIS_URL)."
-        else
-            # Determine whether we need sudo to reach the Docker socket
-            DOCKER="docker"
-            if ! docker info >/dev/null 2>&1; then
-                if sudo docker info >/dev/null 2>&1; then
-                    echo "[INFO] Docker socket not accessible without sudo. Using sudo for Docker commands."
-                    DOCKER="sudo docker"
-                else
-                    echo "[INFO] Docker daemon is not running. Attempting to start it..."
-                    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^docker\.service'; then
-                        sudo systemctl start docker
-                        sleep 2
-                    elif command -v service >/dev/null 2>&1; then
-                        sudo service docker start
-                        sleep 2
-                    else
-                        echo "[ERROR] Cannot start Docker daemon automatically. Start it manually."
-                        exit 1
-                    fi
-                    if sudo docker info >/dev/null 2>&1; then
-                        DOCKER="sudo docker"
-                        echo "[OK] Docker daemon started."
-                    else
-                        echo "[ERROR] Docker daemon still not reachable after start attempt."
-                        echo "   Try: sudo systemctl start docker"
-                        exit 1
-                    fi
-                fi
-                # Ensure user is in docker group for future runs (no sudo needed)
-                if ! id -nG "$USER" | grep -qw docker; then
-                    echo "[INFO] Adding $USER to docker group (takes effect on next login)..."
-                    sudo usermod -aG docker "$USER" && newgrp docker
-                fi
-            fi
-
-            if $DOCKER ps --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER_NAME}$"; then
-                echo "[OK] Redis Stack container already running: $REDIS_CONTAINER_NAME"
-            elif $DOCKER ps -a --format '{{.Names}}' | grep -q "^${REDIS_CONTAINER_NAME}$"; then
-                if $DOCKER start "$REDIS_CONTAINER_NAME" >/dev/null 2>&1; then
-                    echo "[OK] Redis Stack container started: $REDIS_CONTAINER_NAME"
-                else
-                    echo "[WARN]  Failed to start existing Redis container: $REDIS_CONTAINER_NAME"
-                    exit 1
-                fi
-            else
-                if $DOCKER run -d --name "$REDIS_CONTAINER_NAME" -p 6379:6379 redis/redis-stack-server:latest >/dev/null 2>&1; then
-                    echo "[OK] Redis Stack container created and started: $REDIS_CONTAINER_NAME"
-                else
-                    echo "[WARN]  Failed to create/start Redis Stack container: $REDIS_CONTAINER_NAME"
-                    exit 1
-                fi
-            fi
-        fi
-
-        # Validate Redis reachability for memory layer, regardless of Docker usage.
-        if command -v redis-cli >/dev/null 2>&1; then
-            if redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
-                echo "[OK] Redis is reachable at $REDIS_URL"
-            else
-                echo "[WARN]  Redis is not reachable at $REDIS_URL"
-                echo "   Memory features will be disabled until Redis is available."
-            fi
-        else
-            echo "ℹ️  redis-cli not installed; skipping Redis reachability check."
-        fi
+        echo "[WARN]  Redis is not reachable at $REDIS_URL"
+        echo "   Memory features will be disabled until Redis is available."
     fi
 else
-    echo ""
-    echo "⏭️  Skipping Redis startup (--no-redis)"
+    echo "ℹ️  redis-cli not installed; skipping Redis reachability check."
 fi
 
 if [[ "$LAUNCH_INFERENCE" == "true" ]]; then
@@ -320,7 +288,7 @@ else
         for i in $(seq 1 $MAX_RETRIES); do
             HEALTH_RESPONSE=$(curl -fsS http://127.0.0.1:$API_PORT/health 2>/dev/null || true)
             if echo "$HEALTH_RESPONSE" | grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true'; then
-                echo "[OK] API is ready and responding on http://$API_HOST:$API_PORT"
+                echo "[OK] API is ready and responding on http://127.0.0.1:$API_PORT"
                 API_READY=true
                 break
             else
@@ -371,9 +339,9 @@ else
             sleep 1
         done
         if [[ "$FRONTEND_READY" == "true" ]]; then
-            echo "[OK] Frontend is ready on http://$API_HOST:$FRONTEND_PORT"
+            echo "[OK] Frontend is ready on http://127.0.0.1:$FRONTEND_PORT"
         else
-            echo "[ERROR] Frontend did not become ready on http://$API_HOST:$FRONTEND_PORT"
+            echo "[ERROR] Frontend did not become ready on http://127.0.0.1:$FRONTEND_PORT"
             echo "   Check logs: tail -f $FRONTEND_LOG"
             exit 1
         fi
@@ -388,7 +356,7 @@ echo "🎉 API and Frontend launch complete!"
 echo ""
 echo "📊 Access points:"
 echo "   API:      http://$API_HOST:$API_PORT"
-echo "   Frontend: http://$API_HOST:$FRONTEND_PORT"
+echo "   Frontend: http://127.0.0.1:$FRONTEND_PORT"
 echo "   Health:   http://$API_HOST:$API_PORT/health"
 echo ""
 echo "🔍 Check status:"

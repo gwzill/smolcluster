@@ -134,8 +134,9 @@ else:
 
 SERVER_PORT = int(os.getenv("INFERENCE_SERVER_PORT", default_port))
 REDIS_URL = os.getenv("REDIS_URL", "redis://0.0.0.0:6379/0")
-_TOKEN_PING = Path("/tmp/smolcluster_token_ping")
-_LAST_TOKEN = Path("/tmp/smolcluster_last_token")
+_TOKEN_PING     = Path("/tmp/smolcluster_token_ping")
+_LAST_TOKEN     = Path("/tmp/smolcluster_last_token")
+_TOKEN_INTERVAL = Path("/tmp/smolcluster_token_interval_ms")  # real inter-token ms
 
 # Get web interface port from cluster config
 API_PORT = cluster_config["web_interface"]["api_port"]
@@ -525,6 +526,7 @@ async def chat(chat_request: ChatRequest, http_request: Request):
             # Stream tokens as they arrive
             full_text = ""
             client_disconnected = False
+            _last_tok_time: float = 0.0  # wall-clock time of previous token (for interval)
             
             while True:
                 response = receive_message(sock)
@@ -537,9 +539,18 @@ async def chat(chat_request: ChatRequest, http_request: Request):
                 command, result = response
 
                 if command == "token":
-                    # Ping dashboard so its topology animation knows tokens are flowing
-                    try: _TOKEN_PING.touch()
-                    except OSError: pass
+                    # Ping dashboard so its topology animation knows tokens are flowing.
+                    # Also write the real inter-token interval so the dashboard can
+                    # drive animation speed without guessing or hardcoding values.
+                    _now = time.time()
+                    try:
+                        _TOKEN_PING.touch()
+                        if _last_tok_time > 0:
+                            _interval_ms = (_now - _last_tok_time) * 1000
+                            _TOKEN_INTERVAL.write_text(f"{_interval_ms:.1f}")
+                    except OSError:
+                        pass
+                    _last_tok_time = _now
                     token_text = result.get("text", "")
                     try:
                         _LAST_TOKEN.write_text(token_text)

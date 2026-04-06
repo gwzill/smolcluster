@@ -252,10 +252,10 @@ class NodeManager:
                 raise ValueError("Already running — stop it first")
 
         # ── Build the updated config ──────────────────────────────────────────
+        import io as _io
         p = Path(config_path)
         config = {}
         if p.exists():
-            import io as _io
             config = _yaml.load(p.read_text()) or {}
 
         server_info = nodes_info.get(server_hostname, {})
@@ -266,8 +266,16 @@ class NodeManager:
         host_ip = dict(config.get("host_ip", {}))
         port_cfg = dict(config.get("port", {})) if isinstance(config.get("port", {}), dict) else {"default": config.get("port", 65432)}
         default_port = int(port_cfg.get("default", 65432))
+        if not server_ip:
+            # IP not discovered — try to reuse whatever the existing config already knows
+            # about this server under either its alias or its raw hostname.
+            server_ip = host_ip.get(server_alias) or host_ip.get(server_hostname, "")
         if server_ip:
             host_ip[server_alias] = server_ip
+            # Also write under the raw discovery hostname so launch_api.sh can
+            # resolve it even when the alias differs (e.g. "macmini1" vs "mini1").
+            if server_alias != server_hostname:
+                host_ip[server_hostname] = server_ip
 
         workers_regular_raw = []
         for hostname, info in nodes_info.items():
@@ -318,6 +326,24 @@ class NodeManager:
 
         config["host_ip"] = host_ip
         config["port"] = port_cfg
+
+        # ── IP validation: catch missing IPs before writing config ───────────
+        _check_workers = all_workers if algorithm == "classicdp" else workers_regular
+        _missing_ips = [w["hostname"] for w in _check_workers if not w.get("ip")]
+        if not server_ip:
+            _missing_ips.insert(0, server_alias)
+        if _missing_ips:
+            _cfg_name = Path(config_path).name
+            _msg = (
+                f"\n[ERROR] Cannot start inference — IP address unknown for: {', '.join(_missing_ips)}\n"
+                f"\n  Fix: open  src/smolcluster/configs/inference/{_cfg_name}\n"
+                f"  and add the missing entries under  host_ip:\n"
+            )
+            for _h in _missing_ips:
+                _msg += f"    {_h}: \"<LAN IP of that machine>\"\n"
+            _msg += "\n  Then click Infer again.\n"
+            self._log(server_hostname, _msg)
+            raise ValueError(_msg.strip())
 
         _buf = _io.StringIO()
         _yaml.dump(config, _buf)
@@ -397,15 +423,14 @@ class NodeManager:
 
             config["server"] = server_alias
 
-            workers_raw = [
-                {
-                    "hostname": (info.get("ssh_alias") or hostname),
-                    "rank":     info["rank"],
-                    "ip":       info.get("ip", ""),
-                }
-                for hostname, info in nodes_info.items()
-                if hostname != server_hostname
-            ]
+            workers_raw = []
+            for hostname, info in nodes_info.items():
+                if hostname == server_hostname:
+                    continue
+                alias = info.get("ssh_alias") or hostname
+                # Fall back to existing host_ip in config when discovery returns no IP
+                ip = info.get("ip", "") or host_ip.get(alias, "") or host_ip.get(hostname, "")
+                workers_raw.append({"hostname": alias, "rank": info["rank"], "ip": ip})
             workers_raw.sort(key=lambda w: w["rank"])
             # Re-number workers from 1 (server is implicit rank 0)
             workers = [{**w, "rank": i} for i, w in enumerate(workers_raw, 1)]
@@ -419,6 +444,7 @@ class NodeManager:
         elif topology in ("allToAll", "pipeline"):
             # All nodes are workers — sort by selection rank, assign 0-indexed ranks
             # server_hostname gets rank 0
+            host_ip_existing = dict(config.get("host_ip", {}))
             nodes_sorted = sorted(
                 nodes_info.items(),
                 key=lambda x: (0 if x[0] == server_hostname else x[1]["rank"]),
@@ -426,7 +452,8 @@ class NodeManager:
             all_workers = []
             for i, (hostname, info) in enumerate(nodes_sorted):
                 alias = info.get("ssh_alias") or hostname
-                ip    = info.get("ip", "")
+                # Fall back to existing host_ip in config when discovery returns no IP
+                ip = info.get("ip", "") or host_ip_existing.get(alias, "") or host_ip_existing.get(hostname, "")
                 entry: dict = {"hostname": alias, "rank": i, "ip": ip}
                 if topology == "allToAll":
                     entry["port"] = 65432 + i
@@ -436,6 +463,29 @@ class NodeManager:
             config[topo_key]      = {"workers": {"regular": all_workers, "tablets": []}}
             config["num_workers"] = len(all_workers)
             config["num_nodes"]   = len(all_workers)
+
+        # ── IP validation: catch missing IPs before writing config ───────────
+        _missing_ips: list[str] = []
+        if topology in ("flat_server", "nested_server"):
+            for w in workers:
+                if not w.get("ip"):
+                    _missing_ips.append(w["hostname"])
+        elif topology in ("allToAll", "pipeline"):
+            for w in all_workers:
+                if not w.get("ip"):
+                    _missing_ips.append(w["hostname"])
+        if _missing_ips:
+            _cfg_rel = config_path.name
+            _msg = (
+                f"\n[ERROR] Cannot start training — IP address unknown for: {', '.join(_missing_ips)}\n"
+                f"\n  Fix: open  src/smolcluster/configs/{_cfg_rel}\n"
+                f"  and add the missing entries under  host_ip:\n"
+            )
+            for _h in _missing_ips:
+                _msg += f"    {_h}: \"<LAN IP of that machine>\"\n"
+            _msg += "\n  Then click Train again.\n"
+            self._log(server_hostname, _msg)
+            raise ValueError(_msg.strip())
 
         _buf = _io.StringIO()
         _yaml.dump(config, _buf)
@@ -468,6 +518,9 @@ class NodeManager:
             selected = dict(self.selected)
             self.processes.clear()
 
+        label = next(iter(procs), "local")
+        self._log(label, "[stop] Terminating processes…")
+
         for hostname, info in procs.items():
             proc = info["proc"]
             if proc.returncode is None:
@@ -478,53 +531,98 @@ class NodeManager:
                     proc.kill()
             logger.info(f"[node_manager] Stopped {hostname}")
 
-        # Launch scripts often spawn long-lived remote tmux sessions.
-        # Stop should clean those up as well.
-        await self._cleanup_tmux_sessions(selected)
+        # Kill any tmux sessions spawned by the launch scripts on all nodes.
+        await self._cleanup_tmux_sessions(label, selected)
 
-    async def _cleanup_tmux_sessions(self, selected: Dict[str, dict]) -> None:
+    async def run_cleanup_script(self, script_path: str, log_label: str) -> None:
+        """
+        Run an external cleanup script (e.g. launch_inference.sh --cleanup)
+        and stream every line to the log buffer so the user can see progress.
+        """
+        if not Path(script_path).exists():
+            self._log(log_label, f"[stop] Cleanup script not found: {script_path}")
+            return
+        self._log(log_label, f"[stop] $ bash {script_path} --cleanup")
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash", script_path, "--cleanup",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                cwd=str(Path(script_path).parent.parent.parent),  # project root
+            )
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    self._log(log_label, line)
+            await proc.wait()
+            self._log(log_label, f"[stop] Cleanup script done (rc={proc.returncode})")
+        except Exception as e:
+            self._log(log_label, f"[stop] Cleanup script error: {e}")
+
+    async def _cleanup_tmux_sessions(self, log_label: str, selected: Dict[str, dict]) -> None:
+        # Matches every tmux session name that smolcluster scripts create.
         tmux_pattern = (
-            "^(server.*|worker.*|classicdp_worker.*|fsdp_worker.*|ep_worker.*|"
-            "mp_pipeline_worker.*|syncps_inf_.*|classicdp_inf_.*|mp_inference_.*|mp_tablet_proxy.*|"
-            "syncps_api|syncps_frontend|classicdp_api|classicdp_frontend|mp_api|mp_frontend)$"
+            "^(server|worker[0-9]*"
+            "|classicdp_worker[0-9]*|fsdp_worker[0-9]*|ep_worker[0-9]*|mp_pipeline_worker[0-9]*"
+            "|syncps_inf_.*|classicdp_inf_.*|mp_inference_.*|mp_tablet_proxy[0-9]*"
+            "|syncps_api|syncps_frontend|classicdp_api|classicdp_frontend|mp_api|mp_frontend)$"
         )
-
-        local_cleanup = (
-            "if command -v tmux >/dev/null 2>&1; then "
+        # One-liner that lists+kills on any POSIX shell (no xargs -r, no GNU extensions)
+        _kill_cmd = (
             "tmux ls 2>/dev/null | cut -d: -f1 | "
             f"grep -E '{tmux_pattern}' | "
-            "xargs -r -I{} tmux kill-session -t {} 2>/dev/null || true; "
-            "fi"
-        )
-        await asyncio.to_thread(
-            subprocess.run,
-            ["bash", "-lc", local_cleanup],
-            capture_output=True,
-            text=True,
+            "while IFS= read -r _s; do tmux kill-session -t \"$_s\" 2>/dev/null; echo \"killed:$_s\"; done; "
+            "pkill -f 'smolcluster' 2>/dev/null || true"
         )
 
-        seen_targets = set()
+        # ── Local cleanup ─────────────────────────────────────────────────────
+        self._log(log_label, "[stop] Killing local tmux sessions…")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-lc", _kill_cmd],
+            capture_output=True, text=True,
+        )
+        killed = [l.replace("killed:", "").strip()
+                  for l in result.stdout.splitlines() if l.startswith("killed:")]
+        if killed:
+            for s in killed:
+                self._log(log_label, f"[stop]   killed local: {s}")
+        else:
+            self._log(log_label, "[stop]   no matching local tmux sessions found")
+
+        # ── Remote cleanup ────────────────────────────────────────────────────
+        seen_targets: set = set()
         for hostname, info in selected.items():
-            target = _build_ssh_target(info.get("ssh_user", ""), hostname)
+            ssh_user = info.get("ssh_user", "")
+            target = _build_ssh_target(ssh_user, hostname)
             if target in seen_targets:
                 continue
             seen_targets.add(target)
-            remote_cleanup = (
-                "if command -v tmux >/dev/null 2>&1; then "
-                "tmux ls 2>/dev/null | cut -d: -f1 | "
-                f"grep -E '{tmux_pattern}' | "
-                "xargs -r -I{} tmux kill-session -t {} 2>/dev/null || true; "
-                "fi"
-            )
-            cmd = [
+
+            self._log(log_label, f"[stop] Remote cleanup on {target}…")
+            remote_cmd = [
                 "ssh", "-o", "StrictHostKeyChecking=no",
                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
-                target, remote_cleanup,
+                target, _kill_cmd,
             ]
             try:
-                await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+                lr = await asyncio.to_thread(
+                    subprocess.run, remote_cmd, capture_output=True, text=True
+                )
+                r_killed = [l.replace("killed:", "").strip()
+                            for l in lr.stdout.splitlines() if l.startswith("killed:")]
+                if r_killed:
+                    for s in r_killed:
+                        self._log(log_label, f"[stop]   killed {target}: {s}")
+                else:
+                    self._log(log_label, f"[stop]   no matching sessions on {target}")
             except Exception as e:
-                logger.debug(f"[node_manager] tmux cleanup on {target}: {e}")
+                self._log(log_label, f"[stop]   {target} unreachable: {e}")
 
     # ── Username probe ─────────────────────────────────────────────────────────
 

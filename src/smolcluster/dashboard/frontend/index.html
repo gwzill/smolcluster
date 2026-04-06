@@ -207,9 +207,9 @@
     .cmd-wrap {
       border-radius: 16px;
       overflow: hidden;
-      border: 1px solid rgba(8,23,28,0.12);
-      background: linear-gradient(180deg, #10242a 0%, #0b1a1e 100%);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 12px 30px rgba(12,26,30,0.12);
+      border: 1px solid var(--line);
+      background: #fff;
+      box-shadow: 0 8px 18px rgba(15,41,38,0.08);
     }
     .cmd-head {
       display: flex;
@@ -217,8 +217,8 @@
       justify-content: space-between;
       gap: 12px;
       padding: 10px 12px;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+      border-bottom: 1px solid var(--line);
+      background: rgba(248,249,248,0.92);
     }
     .cmd-head-left {
       display: flex;
@@ -241,21 +241,21 @@
     .cmd-dots span:nth-child(2) { background: #febc2e; }
     .cmd-dots span:nth-child(3) { background: #28c840; }
     .cmd-title {
-      color: rgba(255,255,255,0.84);
+      color: var(--ink);
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
     .cmd-subtitle {
-      color: rgba(255,255,255,0.42);
+      color: var(--ink-3);
       font-size: 10px;
       font-family: 'IBM Plex Mono', monospace;
     }
     .copy-btn {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.16);
-      color: rgba(255,255,255,0.72);
+      background: rgba(15,41,38,0.06);
+      border: 1px solid var(--line);
+      color: var(--ink-2);
       border-radius: 6px;
       padding: 5px 10px;
       font-size: 10px;
@@ -265,7 +265,7 @@
       transition: background .12s, color .12s;
       letter-spacing: .3px;
     }
-    .copy-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+    .copy-btn:hover { background: rgba(15,41,38,0.13); color: var(--ink); }
     .copy-btn.copied { color: #1a9e63; border-color: rgba(26,158,99,0.5); }
 
     .setup-shell {
@@ -367,7 +367,7 @@
       line-height: 1.45;
     }
     .setup-cmd {
-      color: rgba(255,255,255,0.9);
+      color: var(--ink-2);
       padding: 14px 16px 16px;
       font-family: 'IBM Plex Mono', monospace;
       font-size: 11.5px;
@@ -945,6 +945,28 @@
       background: rgba(192,57,43,0.10);
       color: var(--red);
     }
+    .gen-tput-stat {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(22,125,144,0.08);
+      font-family: 'IBM Plex Mono', monospace;
+    }
+    .gen-tput-stat .gen-tput-num {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--teal);
+      line-height: 1;
+    }
+    .gen-tput-stat .gen-tput-unit {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+    }
     .gen-stream {
       min-height: 0;
       display: flex;
@@ -1178,6 +1200,10 @@
           <div class="mslbl">Grad Norm</div>
           <div class="msval" id="m-gn" style="font-size:13px">—</div>
         </div>
+        <div class="mstat">
+          <div class="mslbl">LR</div>
+          <div class="msval" id="m-lr" style="font-size:13px">—</div>
+        </div>
         <div class="prog-bar-wrap" id="prog-wrap" style="display:none">
           <div class="prog-labels">
             <span id="prog-lbl">—</span>
@@ -1285,7 +1311,13 @@
                 <div class="gen-card-title">Stream Output</div>
                 <div class="gen-card-sub" id="gen-stream-status">Waiting for a request.</div>
               </div>
-              <div class="gen-status-pill" id="gen-stream-pill">ready</div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="gen-tput-stat" id="gen-tput-stat" style="display:none">
+                  <span class="gen-tput-num" id="gen-tput-num">—</span>
+                  <span class="gen-tput-unit">tok/s</span>
+                </div>
+                <div class="gen-status-pill" id="gen-stream-pill">ready</div>
+              </div>
             </div>
             <div class="gen-stream-main">
               <div class="gen-output" id="gen-output"><span class="gen-empty">No generation yet. Compose a request on the left and stream the reply here.</span></div>
@@ -1315,6 +1347,7 @@ let ssEventSource = null;  // Global state event source
 let logsEventSource = null; // Global logs event source
 let generationAbortController = null;
 let generationInFlight = false;
+let _genStartTime = null, _genTokenCount = 0;
 let trainingFallbackMetrics = {};
 
 const TRAIN_ALGOS = [
@@ -1758,6 +1791,28 @@ function renderSetupStep() {
 // ════════════════════════════════════════════════════════════════════════════
 // SSE — state stream
 // ════════════════════════════════════════════════════════════════════════════
+let _dupCleanupDone = false;
+/** One-time cleanup: deselect stale duplicate-IP entries from state.selected. */
+async function _cleanupDuplicateSelected() {
+  if (_dupCleanupDone) return;
+  // Wait until discovered has IP info
+  if (!Object.values(state.discovered).some(n => n.ip)) return;
+  _dupCleanupDone = true;
+  const seenIps = new Map();
+  // Sort: shorter key (SSH alias) wins
+  const keys = Object.keys(state.selected).sort((a, b) => a.length - b.length);
+  for (const h of keys) {
+    const ip = state.discovered[h]?.ip || '';
+    if (!ip) continue;
+    if (seenIps.has(ip)) {
+      // h is a duplicate — deselect it silently
+      await fetch(`/api/nodes/${h}/deselect`, { method: 'POST' }).catch(() => {});
+    } else {
+      seenIps.set(ip, h);
+    }
+  }
+}
+
 function startSSE() {
   ssEventSource = new EventSource('/api/events');
   ssEventSource.onmessage = e => {
@@ -1768,10 +1823,36 @@ function startSSE() {
     state.usernames     = d.nodes.usernames     || {};
     state.ssh_aliases   = d.nodes.ssh_aliases   || {};
     state.node_os       = d.nodes.node_os       || {};
+    // null means server explicitly cleared metrics (training stopped).
+    // Reset the log-side fallback too so stale values don't linger.
+    if (d.training === null) trainingFallbackMetrics = {};
     state.training      = d.training            || {};
     state.connectivity  = d.connectivity        || {};
     state.token_ts      = d.token_ts            || 0;
     state.token_text    = d.token_text          || '';
+    state.grad_ts       = d.grad_ts             || 0;
+    // Measure the real interval between gradient exchange events.
+    // Clamp to [400ms, 30s] to avoid absurd values on first ping or stale data.
+    if (state.grad_ts && state.grad_ts !== _prevGradTs && _prevGradTs > 0) {
+      const measured = (state.grad_ts - _prevGradTs) * 1000;
+      if (measured > 200 && measured < 30000)
+        _gradIntervalMs = _gradIntervalMs * 0.7 + measured * 0.3; // EMA smoothing
+    }
+    if (state.grad_ts && state.grad_ts !== _prevGradTs) _prevGradTs = state.grad_ts;
+    // Measure real interval between token events for inference speed matching.
+    if (state.token_ts && state.token_ts !== _prevTokenTs && _prevTokenTs > 0) {
+      const measuredTok = (state.token_ts - _prevTokenTs) * 1000;
+      if (measuredTok > 50 && measuredTok < 10000)
+        _tokenIntervalMs = _tokenIntervalMs * 0.35 + measuredTok * 0.65; // fast-converging EMA
+    }
+    if (state.token_ts && state.token_ts !== _prevTokenTs) _prevTokenTs = state.token_ts;
+    // Override EMA with the real server-measured intervals when available (no estimation).
+    if (d.grad_interval_ms != null && d.grad_interval_ms > 100 && d.grad_interval_ms < 60000)
+      _gradIntervalMs = d.grad_interval_ms;
+    if (d.token_interval_ms != null && d.token_interval_ms > 30 && d.token_interval_ms < 10000)
+      _tokenIntervalMs = d.token_interval_ms;
+
+    _cleanupDuplicateSelected();
 
     const nSig = JSON.stringify([state.discovered, state.selected, state.running, state.usernames, state.node_os]);
     const tSig = JSON.stringify(state.training);
@@ -1797,10 +1878,48 @@ function startLogs() {
 // ════════════════════════════════════════════════════════════════════════════
 // Render helpers
 // ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Deduplicate a set of hostnames by IP address, using state.discovered for
+ * IP lookup. When two hostnames resolve to the same IP, keep whichever is
+ * in state.running first, then prefer the shorter key (SSH alias).
+ * Returns a new object with duplicate keys removed.
+ */
+function dedupByIp(hostnameMap) {
+  const seenIps = new Map(); // ip → kept key
+  const result  = {};
+  // Sort: running entries first, then by key length (shorter = SSH alias)
+  const sorted = Object.keys(hostnameMap).sort((a, b) => {
+    const aRun = a in state.running ? 0 : 1;
+    const bRun = b in state.running ? 0 : 1;
+    if (aRun !== bRun) return aRun - bRun;
+    return a.length - b.length;
+  });
+  for (const h of sorted) {
+    const ip = state.discovered[h]?.ip || '';
+    if (ip && seenIps.has(ip)) continue; // duplicate — skip
+    if (ip) seenIps.set(ip, h);
+    result[h] = hostnameMap[h];
+  }
+  return result;
+}
+
+/** Deduplicated discovered nodes (by IP). */
+function discoveredDedup() {
+  return dedupByIp(state.discovered);
+}
+
+/** Deduplicated union of selected + running nodes (by IP). */
+function clusterDedup() {
+  const merged = {};
+  for (const [h,v] of Object.entries(state.selected)) merged[h] = v;
+  for (const [h,v] of Object.entries(state.running))  merged[h] = v;
+  return dedupByIp(merged);
+}
+
 function renderHeader() {
-  setText('lbl-disc', `${Object.keys(state.discovered).length} discovered`);
-  const n = new Set([...Object.keys(state.selected), ...Object.keys(state.running)]).size;
-  setText('lbl-clus', `${n} in cluster`);
+  setText('lbl-disc', `${Object.keys(discoveredDedup()).length} discovered`);
+  setText('lbl-clus', `${Object.keys(clusterDedup()).length} in cluster`);
 }
 
 function currentAlgoOptions() {
@@ -1998,7 +2117,11 @@ function updateGenerationCurlPreview() {
 
 function syncGenerationAvailability() {
   syncGenerationTargetingRules();
-  const live = isInferenceRunning();
+  // isInferenceRunning() checks state.running, but after a launcher script exits
+  // (status: "launched") the entry remains in state.running with role "inference_launcher".
+  // Also treat inferLocked=true as "live" so the button enables as soon as the launch
+  // API call returns, before the first SSE tick arrives.
+  const live = isInferenceRunning() || (inferLocked && dashboardMode === 'infer');
   const canSend = live && !generationInFlight;
   $('gen-send').disabled = !canSend;
   $('gen-stop').disabled = !generationInFlight;
@@ -2067,8 +2190,12 @@ async function sendGenerationRequest() {
   persistGenerationForm();
   generationAbortController = new AbortController();
   generationInFlight = true;
+  _genStartTime = null;
+  _genTokenCount = 0;
   $('gen-output').textContent = '';
   $('gen-raw').textContent = '';
+  $('gen-tput-stat').style.display = 'none';
+  $('gen-tput-num').textContent = '—';
   $('gen-stream-pill').textContent = 'live';
   $('gen-stream-pill').className = 'gen-status-pill live';
   $('gen-stream-status').textContent = 'Streaming response…';
@@ -2105,6 +2232,13 @@ async function sendGenerationRequest() {
           if (typeof evt.token === 'string') {
             appendGenerationText(evt.token);
             sawToken = true;
+            if (!_genStartTime) _genStartTime = Date.now();
+            _genTokenCount++;
+            const elapsed = (Date.now() - _genStartTime) / 1000;
+            if (elapsed > 0) {
+              $('gen-tput-stat').style.display = 'flex';
+              $('gen-tput-num').textContent = Math.round(_genTokenCount / elapsed).toLocaleString();
+            }
           }
           if (evt.done) {
             $('gen-stream-pill').textContent = 'done';
@@ -2173,7 +2307,7 @@ function initGenerationComposer() {
 // ── Left panel ───────────────────────────────────────────────────────────────
 function renderLeft() {
   const list  = $('disc-list');
-  const nodes = state.discovered;
+  const nodes = discoveredDedup();
   const keys  = Object.keys(nodes);
 
   if (!keys.length) {
@@ -2197,7 +2331,7 @@ function buildCard(h, n) {
   c.className = 'ncard'; c.dataset.h = h;
   c.innerHTML = `
     <div class="nhead">
-      <div class="nicon">${nodeIcon(n)}</div>
+      <div class="nicon">${nodeIcon({...n, alias: state.ssh_aliases[h] || n.alias || h})}</div>
       <div>
         <div class="nname">${aliasLabel}</div>
         <div class="nmeta">${[n.os,n.os_version,n.machine].filter(s=>s&&s!=='unknown').join(' · ')}</div>
@@ -2299,7 +2433,13 @@ function renderConnBar() {
 // ── Training metrics ──────────────────────────────────────────────────────────
 function renderMetrics() {
   const tRaw = state.training || {};
-  const t = { ...trainingFallbackMetrics, ...tRaw };
+  // Merge: fallback first, then state.training — but skip null/undefined values
+  // from the API so they never shadow valid fallback metrics. (Nulls appear when
+  // the server writes NaN floats or when a race-condition produces a partial read.)
+  const t = { ...trainingFallbackMetrics };
+  for (const [k, v] of Object.entries(tRaw)) {
+    if (v !== null && v !== undefined) t[k] = v;
+  }
   const runningVals = Object.values(state.running || {});
   const isTrainingRunning = runningVals.some(r => r.role === 'server' || r.role === 'worker' || r.role === 'training_launcher');
   const has = isTrainingRunning && (t.step != null || t.loss != null || t.throughput != null || t.grad_norm != null);
@@ -2308,16 +2448,22 @@ function renderMetrics() {
   setText('m-loss', t.loss       != null ? Number(t.loss).toFixed(4) : '—');
   setText('m-tput', t.throughput != null ? Math.round(t.throughput)  : '—');
   setText('m-step', t.step       != null ? t.step.toLocaleString()   : '—');
-  setText('m-gn', t.grad_norm != null ? Number(t.grad_norm).toFixed(3) : '—');
+  setText('m-gn',   t.grad_norm  != null ? (isNaN(+t.grad_norm) ? String(t.grad_norm) : (+t.grad_norm).toFixed(3)) : '—');
+  if (t.lr != null) {
+    const lrVal = Number(t.lr);
+    setText('m-lr', lrVal < 0.001 ? lrVal.toExponential(2) : lrVal.toPrecision(3));
+  } else {
+    setText('m-lr', '—');
+  }
   const totalSteps = t.total_steps ?? t.max_steps ?? t.steps_total ?? null;
   setText('m-step-sub', totalSteps ? `of ${totalSteps.toLocaleString()}` : '');
   const hasProg = t.step != null && totalSteps;
   $('prog-wrap').style.display = hasProg ? '' : 'none';
   if (hasProg) {
-    const pct = Math.min(100, Math.round(t.step / totalSteps * 100));
-    $('prog-fill').style.width = pct + '%';
+    const pct = Math.min(100, (t.step / totalSteps * 100));
+    $('prog-fill').style.width = pct.toFixed(2) + '%';
     setText('prog-lbl', `Step ${t.step.toLocaleString()} / ${totalSteps.toLocaleString()}`);
-    setText('prog-pct', pct + '%');
+    setText('prog-pct', pct < 1 ? pct.toFixed(2) + '%' : Math.round(pct) + '%');
   }
 }
 
@@ -2336,8 +2482,25 @@ function appendLog({ hostname, line }) {
   // Persist to localStorage buffer
   persistLog({ hostname, line });
 
+  // Fast-path: structured metrics JSON emitted by the training server.
+  // Format: "[SMOL_METRICS] {\"step\":50,\"grad_norm\":1.23,...}"
+  // This rides the SSH-tailed log stream so metrics reach the dashboard
+  // even when the training server runs on a different machine.
+  const smolM = line.match(/\[SMOL_METRICS\]\s*(\{.+\})/);
+  if (smolM) {
+    try {
+      const m = JSON.parse(smolM[1]);
+      for (const [k, v] of Object.entries(m)) {
+        if (v !== null && v !== undefined) trainingFallbackMetrics[k] = v;
+      }
+      trainingFallbackMetrics.algorithm ||= _activeAlgo || $('algo-sel').value;
+      renderMetrics();
+    } catch(e) {}
+    // Fall through so the line is also visible in the log terminal.
+  }
+
   const lowerLine = String(line || '').toLowerCase();
-  const isTrainingLog = /step|loss|tok\/s|gradient norm|grad_norm/.test(lowerLine);
+  const isTrainingLog = /step|loss|tok\/s|gradient norm|grad_norm|\blr\b/.test(lowerLine);
   if (isTrainingLog) {
     let dirtyTrainingFallback = false;
 
@@ -2360,7 +2523,9 @@ function appendLog({ hostname, line }) {
       dirtyTrainingFallback = true;
     }
 
-    const gradMatch = line.match(/gradient norm(?: before clipping)?\s*[:=]\s*([0-9]*\.?[0-9]+)/i);
+    // Match both "Gradient Norm: 1.23" (server log) and "grad_norm=1.23" (tqdm postfix)
+    const gradMatch = line.match(/gradient norm(?: before clipping)?\s*[:=]\s*([0-9]*\.?[0-9]+)/i)
+                   || line.match(/\bgrad_norm[:=]\s*([0-9]*\.?[0-9]+)/i);
     if (gradMatch) {
       trainingFallbackMetrics.grad_norm = Number(gradMatch[1]);
       dirtyTrainingFallback = true;
@@ -2370,6 +2535,15 @@ function appendLog({ hostname, line }) {
     if (tputMatch) {
       trainingFallbackMetrics.throughput = Number(tputMatch[1]);
       dirtyTrainingFallback = true;
+    }
+
+    const lrMatch = line.match(/\bLR[:=]\s*([0-9eE+\-.]+)/i);
+    if (lrMatch) {
+      const lrVal = Number(lrMatch[1]);
+      if (isFinite(lrVal)) {
+        trainingFallbackMetrics.lr = lrVal;
+        dirtyTrainingFallback = true;
+      }
     }
 
     if (dirtyTrainingFallback) {
@@ -2503,6 +2677,15 @@ async function addNode(h, card) {
   const user = sshOverrides[h] || state.ssh_aliases[h] || state.usernames[h] || guessUser(h) || '';
   btn.disabled = true; btn.textContent = 'Adding…';
   try {
+    // Deselect any already-selected node that maps to the same IP (stale duplicate)
+    const myIp = state.discovered[h]?.ip || '';
+    if (myIp) {
+      for (const sel of Object.keys(state.selected)) {
+        if (sel !== h && state.discovered[sel]?.ip === myIp) {
+          await fetch(`/api/nodes/${sel}/deselect`, { method: 'POST' }).catch(() => {});
+        }
+      }
+    }
     const r = await fetch(`/api/nodes/${h}/select`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ ssh_user: user }),
@@ -2543,6 +2726,7 @@ async function removeNode(h, card) {
 async function startTraining() {
   setDashboardMode('train');
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
+  clearLogs();
   const algo  = $('algo-sel').value;
   trainingFallbackMetrics = { algorithm: algo };
   $('prog-wrap').style.display = 'none';
@@ -2571,6 +2755,7 @@ let inferLocked    = false;  // true while inference is running — blocks serve
 async function startInference() {
   setDashboardMode('infer');
   if (!Object.keys(state.selected).length) { alert('Add nodes first.'); return; }
+  clearLogs();
   const algo = $('algo-sel').value;
   // Reset token UI state so stale previous-run tokens do not appear immediately.
   _lastTokenStamp = Number(state.token_ts) || 0;
@@ -2578,11 +2763,6 @@ async function startInference() {
   _lastTokenText = '';
   _pendingTokens = [];
   _tokenDockActive = false;
-  _tokenDocText = '';
-  _tokenDockTokenCount = 0;
-  _tokenDockTruncated = false;
-  if (typeof _tokenDockBody !== 'undefined') _tokenDockBody.textContent = '';
-  if (typeof _tokenDock !== 'undefined') _tokenDock.style.display = 'none';
   // Reset to canonical default layout for these well-defined archetypes.
   if (['syncps', 'classicdp'].includes(algo)) _manualNodePos.clear();
 
@@ -2601,6 +2781,7 @@ async function startInference() {
   });
   if (r.ok) {
     inferLocked = true;
+    syncGenerationAvailability();  // enable Send immediately without waiting for SSE
   } else {
     alert(`Error: ${(await r.json()).detail}`);
   }
@@ -2636,17 +2817,20 @@ async function stopAll() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function $(id)      { return document.getElementById(id); }
 function setText(id, v) { const e=$(id); if(e && e.textContent!==String(v)) e.textContent=v; }
-function guessUser(h) { const m=h.match(/macmini(\d+)/i); return m?`yuvrajsingh${m[1]}`:''; }
+function guessUser(h) { return ''; }
 function escHtml(s)   { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function nodeIcon(n) {
-  const os=((n.os||'').toLowerCase()), h=((n.hostname||'').toLowerCase());
-  if(h.includes('ipad')) return '📱';
-  if(h.includes('pi')||h.includes('rasp')) return '🍓';
-  if(os==='darwin'||h.includes('mac')) return '💻';
-  if(os==='windows'||os==='win32'||h.includes('win')) return '🖥️';
+  const os=((n.os||'').toLowerCase());
+  const h=((n.hostname||'').toLowerCase());
+  const a=((n.alias||'').toLowerCase());
+  const any = h + ' ' + a;
+  if(any.includes('ipad')) return '📱';
+  if(any.includes('pi')||any.includes('rasp')) return '🍓';
+  if(os==='darwin'||any.includes('mac')||any.includes('mini')) return '💻';
+  if(os==='windows'||os==='win32'||any.includes('win')) return '🖥️';
   if(os==='linux'||os==='ubuntu'||os==='debian'||os==='fedora') return '🐧';
-  if(h.includes('jetson')||h.includes('nano')||h.includes('xavier')) return '🐧';
-  return '�';
+  if(any.includes('jetson')||any.includes('nano')||any.includes('xavier')) return '🐧';
+  return '💻';
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2657,6 +2841,10 @@ let spawnTs        = 0;
 let inferParticles = [];
 let inferSpawnTs   = 0;
 let _activeAlgo    = '';
+let _prevGradTs      = 0;   // last grad_ts value we saw
+let _gradIntervalMs  = 3000; // measured ms between successive grad pings (starts at 3s)
+let _prevTokenTs     = 0;   // last token_ts value we saw
+let _tokenIntervalMs = 200; // measured ms between successive token pings (starts at 200ms)
 
 // ── Scene setup ───────────────────────────────────────────────────────────────
 const _T3mount = $('topo3d');
@@ -2772,9 +2960,10 @@ const _VC_W = 600, _VC_H = 420;
 
 function getLayout() {
   const W = _VC_W, H = _VC_H;
-  const all = {};
-  for (const [h,v] of Object.entries(state.selected)) all[h] = {...v, running:false};
-  for (const [h,v] of Object.entries(state.running))  all[h] = {...v, running:true};
+  const raw = {};
+  for (const [h,v] of Object.entries(state.selected)) raw[h] = {...v, running:false};
+  for (const [h,v] of Object.entries(state.running))  raw[h] = {...v, running:true};
+  const all = dedupByIp(raw);
 
   const algo = _activeAlgo || $('algo-sel').value;
   const hasServer = !['classicdp','fsdp','ep','mp_pipeline'].includes(algo);
@@ -3058,10 +3247,10 @@ function _qb3(t, p0, cp, p1) {
   );
 }
 
-// lane: +1 follows the green (lane-1) arc, -1 follows the orange (lane-2) arc —
-// both use the EXACT same Y-lift and control-point formula as _addConn so
-// the particle travels along the visible connection line.
-function _mkParticle(fp, tp, lane, col, sz, phase) {
+// lane: +1 follows the green arc (l1 in _addConn), -1 follows the orange arc (l2)
+// — same Y-lift and control-point formula as _addConn so the particle travels
+//   exactly along the visible connection line.
+function _mkParticle(fp, tp, lane, col, sz, phase, speed = 0.018) {
   const p0u = fp.clone(); p0u.y += 0.72;
   const p1u = tp.clone(); p1u.y += 0.72;
   const mid  = p0u.clone().lerp(p1u, 0.5);
@@ -3069,7 +3258,7 @@ function _mkParticle(fp, tp, lane, col, sz, phase) {
   const perp = new THREE.Vector3().crossVectors(axis, new THREE.Vector3(0, 1, 0)).normalize();
   const cp   = mid.clone().addScaledVector(perp, lane * 0.42);
   cp.y += 1.15;
-  return { fp: p0u, tp: p1u, cp, t: 0, speed: 0.018 + Math.random() * 0.005, col, sz, phase,
+  return { fp: p0u, tp: p1u, cp, t: 0, speed: speed + Math.random() * 0.003, col, sz, phase,
            mesh: _getParticleMesh(col, sz) };
 }
 
@@ -3107,102 +3296,7 @@ _tokenEl.style.cssText = [
 ].join(';');
 _T3overlay.appendChild(_tokenEl);
 
-// Floating token dock: tokens fly in and persist here
-const _tokenDock = document.createElement('div');
-_tokenDock.style.cssText = [
-  'position:absolute',
-  'top:12px',
-  'right:12px',
-  'width:min(300px,42%)',
-  'max-height:44%',
-  'background:#ffffff',
-  'border:1px solid rgba(18,52,59,0.16)',
-  'border-radius:12px',
-  'box-shadow:0 10px 26px rgba(0,0,0,0.16)',
-  'display:flex',
-  'flex-direction:column',
-  'overflow:hidden',
-  'z-index:20',
-  'pointer-events:auto',
-  'display:none'
-].join(';');
-
-const _tokenDockHead = document.createElement('div');
-_tokenDockHead.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid rgba(18,52,59,0.1);font:600 10px "IBM Plex Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:#12343b';
-_tokenDockHead.innerHTML = '<span>Token Stream</span>';
-_tokenDockHead.style.cursor = 'grab';
-const _tokenDockClear = document.createElement('button');
-_tokenDockClear.textContent = 'Clear';
-_tokenDockClear.style.cssText = 'border:none;background:rgba(18,52,59,0.08);color:#12343b;border-radius:8px;padding:4px 8px;font:600 10px "IBM Plex Mono",monospace;cursor:pointer';
-const _tokenDockBody = document.createElement('div');
-_tokenDockBody.style.cssText = 'padding:10px;overflow:auto;min-height:70px;white-space:pre-wrap;word-break:break-word;font:500 12px "IBM Plex Mono",monospace;line-height:1.45;color:#0f1115;background:#ffffff';
-let _tokenDocText = '';
-const _tokenDockMaxTokens = 50;
-const _tokenDockOverflowMsg = '...(read rest from generation tab!)';
-let _tokenDockTokenCount = 0;
-let _tokenDockTruncated = false;
 let _tokenDockActive = false;
-_tokenDockClear.addEventListener('pointerdown', (e) => { e.stopPropagation(); });
-_tokenDockClear.addEventListener('click', () => {
-  _tokenDocText = '';
-  _tokenDockTokenCount = 0;
-  _tokenDockTruncated = false;
-  _tokenDockBody.textContent = '';
-});
-_tokenDockHead.appendChild(_tokenDockClear);
-_tokenDock.appendChild(_tokenDockHead);
-_tokenDock.appendChild(_tokenDockBody);
-_T3overlay.appendChild(_tokenDock);
-
-// Draggable token dock (within topology mount bounds)
-let _dockDragging = false;
-let _dockDragDX = 0;
-let _dockDragDY = 0;
-
-_tokenDockHead.addEventListener('pointerdown', (e) => {
-  if (e.target === _tokenDockClear || (e.target && e.target.closest && e.target.closest('button'))) return;
-  _dockDragging = true;
-  const dockRect = _tokenDock.getBoundingClientRect();
-  _dockDragDX = e.clientX - dockRect.left;
-  _dockDragDY = e.clientY - dockRect.top;
-  _tokenDockHead.style.cursor = 'grabbing';
-  _tokenDock.setPointerCapture?.(e.pointerId);
-});
-
-window.addEventListener('pointermove', (e) => {
-  if (!_dockDragging) return;
-  const hostRect = _T3mount.getBoundingClientRect();
-  const dockRect = _tokenDock.getBoundingClientRect();
-  const nextLeft = Math.max(0, Math.min(hostRect.width - dockRect.width, e.clientX - hostRect.left - _dockDragDX));
-  const nextTop = Math.max(0, Math.min(hostRect.height - dockRect.height, e.clientY - hostRect.top - _dockDragDY));
-  _tokenDock.style.left = `${nextLeft}px`;
-  _tokenDock.style.top = `${nextTop}px`;
-  _tokenDock.style.right = 'auto';
-});
-
-window.addEventListener('pointerup', () => {
-  _dockDragging = false;
-  _tokenDockHead.style.cursor = 'grab';
-});
-
-function _appendTokenDock(text) {
-  if (!text || _tokenDockTruncated) return;
-  _tokenDockTokenCount += 1;
-  if (_tokenDockTokenCount > _tokenDockMaxTokens) {
-    if (_tokenDocText && !_tokenDocText.endsWith('\n')) _tokenDocText += '\n';
-    _tokenDocText += _tokenDockOverflowMsg;
-    _tokenDockTruncated = true;
-    _tokenDockBody.textContent = _tokenDocText;
-    _tokenDockBody.scrollTop = _tokenDockBody.scrollHeight;
-    _tokenDockActive = true;
-    return;
-  }
-  _tokenDocText += text;
-  if (_tokenDocText.length > 32000) _tokenDocText = _tokenDocText.slice(-24000);
-  _tokenDockBody.textContent = _tokenDocText;
-  _tokenDockBody.scrollTop = _tokenDockBody.scrollHeight;
-  _tokenDockActive = true;
-}
 
 function _queueToken(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return;
@@ -3214,27 +3308,6 @@ function _queueToken(raw) {
   if (_pendingTokens.length > 420) _pendingTokens.splice(0, _pendingTokens.length - 260);
 }
 
-function _flyTokenToDock(text, fromX, fromY) {
-  // Animation only — dock text is written directly in appendLog via SSE JSON parse.
-  // Only show the bubble for non-whitespace tokens.
-  const displayText = text.replace(/\n/g, '\u21b5');
-  if (!displayText.trim()) return;
-  const flyer = document.createElement('div');
-  const shown = displayText.length > 24 ? displayText.slice(0, 23) + '\u2026' : displayText;
-  flyer.textContent = shown;
-  flyer.style.cssText = 'position:absolute;left:0;top:0;transform:translate(' + (fromX|0) + 'px,' + (fromY|0) + 'px);color:#ffd5bd;background:rgba(209,105,48,0.24);border:1px solid rgba(209,105,48,0.52);border-radius:999px;padding:3px 8px;font:600 11px "IBM Plex Mono",monospace;white-space:nowrap;pointer-events:none;opacity:.98;transition:transform .65s cubic-bezier(.2,.8,.2,1),opacity .65s';
-  _T3overlay.appendChild(flyer);
-
-  const dockRect = _tokenDock.getBoundingClientRect();
-  const mountRect = _T3mount.getBoundingClientRect();
-  const tx = dockRect.left - mountRect.left + 22;
-  const ty = dockRect.top - mountRect.top + 34;
-  requestAnimationFrame(() => {
-    flyer.style.transform = 'translate(' + (tx|0) + 'px,' + (ty|0) + 'px) scale(.88)';
-    flyer.style.opacity = '0.2';
-  });
-  setTimeout(() => { flyer.remove(); }, 680);
-}
 
 function _projectNode(worldPos, yLift = 1.1) {
   const v = worldPos.clone();
@@ -3284,23 +3357,28 @@ function draw(ts) {
   else if (isTraining)  _activeAlgo = trainAlgo;
   else                  _activeAlgo = '';
 
-  const liveTrainingMetrics = { ...trainingFallbackMetrics, ...(state.training || {}) };
+  // Same null-safe merge used in renderMetrics
+  const liveTrainingMetrics = { ...trainingFallbackMetrics };
+  for (const [k, v] of Object.entries(state.training || {})) {
+    if (v !== null && v !== undefined) liveTrainingMetrics[k] = v;
+  }
   const trainingHasTelemetry = liveTrainingMetrics.step != null
     || liveTrainingMetrics.loss != null
     || liveTrainingMetrics.throughput != null
     || liveTrainingMetrics.grad_norm != null;
-  const trainingPacketsActive = isTraining && trainingHasTelemetry;
+
+  // Packets fire only when a real gradient/weight exchange was detected on the wire:
+  // the training algorithm touches /tmp/smolcluster_grad_ping after each actual send,
+  // and the dashboard exposes its mtime as state.grad_ts — identical to token_ts for inference.
+  const gradOk = isTraining && state.grad_ts && (Date.now() / 1000 - state.grad_ts) < 4.0;
+  const trainingPacketsActive = gradOk;
 
   const { W, H, server, workers, hasServer } = getLayout();
   const crownedHost = _activeCrownedHost(server, workers);
 
-  // Token dock should exist only in Inference tab and only after token streaming starts.
-  const _showTokenDock = (dashboardMode === 'infer') && isInferring && _tokenDockActive;
-  _tokenDock.style.display = _showTokenDock ? 'flex' : 'none';
-
   // ── HUD ────────────────────────────────────────────────────────────────────
   const tag = $('topo-tag');
-  const allInCluster = {...state.selected, ...state.running};
+  const allInCluster = clusterDedup();
   const _displayAlgo = _activeAlgo || $('algo-sel').value;
   tag.textContent = Object.keys(allInCluster).length
     ? (isInferring ? _displayAlgo.toUpperCase() + ' INFERENCE'
@@ -3452,7 +3530,6 @@ function draw(ts) {
       _pendingTokens.shift();
       _lastTokenRaw = queued.raw;
       _lastTokenText = queued.display.length > 24 ? queued.display.slice(0, 23) + '\u2026' : queued.display;
-      _appendTokenDock(queued.raw);
       _tokenFlashTs = ts;
       _newTokenPulse = true;
     }
@@ -3484,7 +3561,6 @@ function draw(ts) {
         }
         if (_newTokenPulse && _lastTokenRaw) {
           _tokenDockActive = true;
-          _flyTokenToDock(_lastTokenRaw, sc.x, sc.y - 20 + bob);
         }
       } else {
         _tokenEl.style.display = 'none';
@@ -3518,10 +3594,21 @@ function draw(ts) {
     });
   }
 
+  // Particle speed derived from real step rate: faster training = faster packets.
+  // At 1s/step → speed≈0.022; at 10s/step → speed≈0.010; clamped [0.008, 0.045].
+  const _pSpeed = () => Math.min(0.045, Math.max(0.008, 1.2 / (_gradIntervalMs / 1000) * 0.018));
+  // Spawn gate: fire a new burst after 90% of the measured step interval,
+  // so each real gradient exchange gets exactly one animation burst.
+  const _spawnGate = Math.max(300, _gradIntervalMs * 0.9);
+  // Inference packet speed derived from real token rate.
+  // At ≤150ms/tok → speed≈0.060; at 400ms/tok → speed≈0.030; floor at 0.030.
+  const _iSpeed = () => Math.min(0.065, Math.max(0.030, 0.006 / (_tokenIntervalMs / 1000)));
+  const _iSpawnGate = Math.max(100, _tokenIntervalMs * 0.75);
+
   // ── Training particles ─────────────────────────────────────────────────────
   const coord = server || (workers.length ? workers[0] : null);
   const peers  = server ? workers : workers.slice(1);
-  if (trainingPacketsActive && isClassicDP && workers.length >= 2 && ts - spawnTs > 420) {
+  if (trainingPacketsActive && isClassicDP && workers.length >= 2 && ts - spawnTs > _spawnGate) {
     const hasG = particles.some(p => p.phase === 'gradients');
     const hasW = particles.some(p => p.phase === 'weights');
     if (!hasG && !hasW && !particles.length) {
@@ -3530,7 +3617,7 @@ function draw(ts) {
           if (i === j) continue;
           const fp = nodeMeshes.get(workers[i].h)?.group.position;
           const tp = nodeMeshes.get(workers[j].h)?.group.position;
-          if (fp && tp) particles.push(_mkParticle(fp.clone(), tp.clone(), ((i+j)%2===0?-1:1), '26,158,99', 4.8, 'gradients'));
+          if (fp && tp) particles.push(_mkParticle(fp.clone(), tp.clone(), 1, '26,158,99', 4.8, 'gradients', _pSpeed()));
         }
       spawnTs = ts;
     }
@@ -3541,25 +3628,25 @@ function draw(ts) {
           if (i === j) continue;
           const fp = nodeMeshes.get(workers[i].h)?.group.position;
           const tp = nodeMeshes.get(workers[j].h)?.group.position;
-          if (fp && tp) particles.push(_mkParticle(fp.clone(), tp.clone(), ((i+j)%2===0?1:-1), '208,106,47', 4.5, 'weights'));
+          if (fp && tp) particles.push(_mkParticle(fp.clone(), tp.clone(), -1, '209,105,48', 4.5, 'weights', _pSpeed()));
         }
-  } else if (trainingPacketsActive && coord && ts - spawnTs > 420) {
+  } else if (trainingPacketsActive && coord && ts - spawnTs > _spawnGate) {
     const hasG = particles.some(p=>p.phase==='gradients');
     const hasW = particles.some(p=>p.phase==='weights');
     if (!hasG && !hasW && !particles.length) {
-      peers.filter(w=>w.running).forEach(w => {
+      peers.forEach(w => {
         const fp  = nodeMeshes.get(w.h)?.group.position;
         const cp3 = nodeMeshes.get(coord.h)?.group.position;
-        if (fp && cp3) particles.push(_mkParticle(fp.clone(), cp3.clone(), -1, '26,158,99', 6, 'gradients'));
+        if (fp && cp3) particles.push(_mkParticle(fp.clone(), cp3.clone(), 1, '26,158,99', 6, 'gradients', _pSpeed()));
       });
       spawnTs = ts;
     }
     const maxG = Math.max(0, ...particles.filter(p=>p.phase==='gradients').map(p=>p.t));
     if (maxG > 0.8 && !particles.some(p=>p.phase==='weights'))
-      peers.filter(w=>w.running).forEach(w => {
+      peers.forEach(w => {
         const cp3 = nodeMeshes.get(coord.h)?.group.position;
         const tp  = nodeMeshes.get(w.h)?.group.position;
-        if (cp3 && tp) particles.push(_mkParticle(cp3.clone(), tp.clone(), 1, '208,106,47', 5.5, 'weights'));
+        if (cp3 && tp) particles.push(_mkParticle(cp3.clone(), tp.clone(), -1, '209,105,48', 5.5, 'weights', _pSpeed()));
       });
   }
   if (!trainingPacketsActive) { particles.forEach(p => { if (p.mesh) p.mesh.visible = false; }); particles = []; }
@@ -3568,8 +3655,8 @@ function draw(ts) {
   const inferCoord = server || workers[0];
   const inferPeers = server ? workers : workers.slice(1);
   if (isInferring && isClassicDP && workers.length >= 2) {
-    const tokenOk = state.token_ts && (Date.now()/1000 - state.token_ts) < 1.5;
-    if (tokenOk && ts - inferSpawnTs > 380) {
+    const tokenOk = state.token_ts && (Date.now()/1000 - state.token_ts) < 4.0;
+    if (tokenOk && ts - inferSpawnTs > _iSpawnGate) {
       const hasOutbound = inferParticles.some(p => p.phase === 'outbound');
       const hasReturn   = inferParticles.some(p => p.phase === 'return');
       if (!hasOutbound && !hasReturn && !inferParticles.length) {
@@ -3578,7 +3665,7 @@ function draw(ts) {
             if (i === j) continue;
             const fp = nodeMeshes.get(workers[i].h)?.group.position;
             const tp = nodeMeshes.get(workers[j].h)?.group.position;
-            if (fp && tp) inferParticles.push(_mkParticle(fp.clone(), tp.clone(), ((i+j)%2===0?-1:1), '23,126,137', 4.8, 'outbound'));
+            if (fp && tp) inferParticles.push(_mkParticle(fp.clone(), tp.clone(), -1, '23,126,137', 4.8, 'outbound', _iSpeed()));
           }
         inferSpawnTs = ts;
       }
@@ -3589,19 +3676,19 @@ function draw(ts) {
             if (i === j) continue;
             const fp = nodeMeshes.get(workers[i].h)?.group.position;
             const tp = nodeMeshes.get(workers[j].h)?.group.position;
-            if (fp && tp) inferParticles.push(_mkParticle(fp.clone(), tp.clone(), ((i+j)%2===0?1:-1), '208,106,47', 4.2, 'return'));
+            if (fp && tp) inferParticles.push(_mkParticle(fp.clone(), tp.clone(), 1, '208,106,47', 4.2, 'return', _iSpeed()));
           }
     }
   } else if (isInferring && inferCoord && inferPeers.length) {
-    const tokenOk = state.token_ts && (Date.now()/1000 - state.token_ts) < 1.5;
-    if (tokenOk && ts - inferSpawnTs > 380) {
+    const tokenOk = state.token_ts && (Date.now()/1000 - state.token_ts) < 4.0;
+    if (tokenOk && ts - inferSpawnTs > _iSpawnGate) {
       const hasOutbound = inferParticles.some(p => p.phase === 'outbound');
       const hasReturn   = inferParticles.some(p => p.phase === 'return');
       if (!hasOutbound && !hasReturn && !inferParticles.length) {
         inferPeers.forEach(w => {
           const ic3 = nodeMeshes.get(inferCoord.h)?.group.position;
           const tp  = nodeMeshes.get(w.h)?.group.position;
-          if (ic3 && tp) inferParticles.push(_mkParticle(ic3.clone(), tp.clone(), -1, '23,126,137', 5.5, 'outbound'));
+          if (ic3 && tp) inferParticles.push(_mkParticle(ic3.clone(), tp.clone(), -1, '23,126,137', 5.5, 'outbound', _iSpeed()));
         });
         inferSpawnTs = ts;
       }
@@ -3610,7 +3697,7 @@ function draw(ts) {
         inferPeers.forEach(w => {
           const ic3 = nodeMeshes.get(inferCoord.h)?.group.position;
           const tp  = nodeMeshes.get(w.h)?.group.position;
-          if (ic3 && tp) inferParticles.push(_mkParticle(tp.clone(), ic3.clone(), 1, '208,106,47', 4.5, 'return'));
+          if (ic3 && tp) inferParticles.push(_mkParticle(tp.clone(), ic3.clone(), 1, '208,106,47', 4.5, 'return', _iSpeed()));
         });
     }
   }

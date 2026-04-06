@@ -1,16 +1,15 @@
 host_ip:
-  mini1: "10.10.0.1"
-  mini2: "10.10.0.2"
-  mini3: "10.10.0.2"
+  macmini1: "10.10.0.1"
+  mini2: 10.10.0.1
+  mini3: 10.10.0.1
   pi4: "10.10.0.1"
   macbook: "10.10.0.1"
   pi5: "192.168.50.1"
   win: "10.10.0.1"
   ipad: "172.20.10.3"
-
 port:
   default: 65432
-  mini1: 65432
+  macmini1: 65432
   mini2: 65432
   mini3: 65432
   pi4: 65432
@@ -21,7 +20,7 @@ port:
 
 # Network buffer sizes (in MB) - device-specific optimizations
 buffer_size:
-  mini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
+  macmini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
   mini2: 8  # Mac Mini - 8MB
   mini3: 8  # Mac Mini - 8MB
   macbook: 8  # MacBook - 8MB
@@ -42,18 +41,16 @@ seed: 42
 
 # Cluster configuration
 num_workers: 2
-server: mini1  # Server hostname
+server: mini2  # Server hostname
 workers:
   regular:
-    - hostname: mini2
-      rank: 1
-    - hostname: mini3
-      rank: 2
-  # tablets:
-  #   - hostname: pi5
-  #     rank: 2
-
-#Model parallelism specific configs
+  - hostname: mini3
+    rank: 1
+    ip: 10.10.0.3
+  - hostname: macmini1
+    rank: 2
+    ip: "10.10.0.1"
+  tablets: []
 num_nodes: 3
 num_layers: 6  # Number of transformer blocks (auto-detected from model, this is just for reference)
-model_name: causal_gpt2 
+model_name: causal_gpt2

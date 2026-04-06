@@ -354,7 +354,16 @@ def run_worker(
         )
     else:
         # Require host_ip for other algorithms
-        host_ip = cluster_config["host_ip"][hostname]
+        if algorithm == "mp" or algorithm == "mp_pipeline":
+            # Workers connect TO the server — look up the server's IP, not our own.
+            server_hostname = cluster_config.get("server", "")
+            host_ip = cluster_config.get("host_ip", {}).get(server_hostname, "")
+            if not host_ip:
+                raise ValueError(
+                    f"{algorithm.upper()}: server '{server_hostname}' missing from host_ip in config"
+                )
+        else:
+            host_ip = cluster_config["host_ip"][hostname]
     
     port_config = cluster_config["port"]
     if isinstance(port_config, dict):

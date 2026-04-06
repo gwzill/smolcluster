@@ -1,74 +1,69 @@
 #!/bin/bash
 
-resolve_compose_cmd() {
-    if docker compose version >/dev/null 2>&1; then
-        COMPOSE_CMD=(docker compose)
+# ensure_redis_running — start Redis if not already reachable.
+# Works on macOS (Homebrew redis-server) and Linux/Jetson (systemd redis-server).
+ensure_redis_running() {
+    local redis_url="${SMOLCLUSTER_REDIS_URL:-redis://127.0.0.1:6379/0}"
+    local redis_host="127.0.0.1"
+    local redis_port="6379"
+
+    # Parse host:port from URL if non-default
+    if [[ "$redis_url" =~ redis://([^:/]+):([0-9]+) ]]; then
+        redis_host="${BASH_REMATCH[1]}"
+        redis_port="${BASH_REMATCH[2]}"
+    fi
+
+    # If already reachable, nothing to do
+    if redis-cli -h "$redis_host" -p "$redis_port" ping >/dev/null 2>&1; then
+        echo "📦 Redis already running on $redis_host:$redis_port"
         return 0
     fi
 
-    if command -v docker-compose >/dev/null 2>&1; then
-        COMPOSE_CMD=(docker-compose)
+    if ! command -v redis-server >/dev/null 2>&1; then
+        echo "[warn] redis-server not found — dashboard state will not be persisted."
+        echo "       Install Redis with: brew install redis   (macOS)"
+        echo "                      or: sudo apt install redis-server   (Linux)"
         return 0
     fi
 
-    COMPOSE_CMD=()
-    return 1
+    echo "📦 Starting Redis on $redis_host:$redis_port..."
+    case "$(uname -s)" in
+        Darwin)
+            # macOS: start as user daemon via redis-server
+            redis-server --daemonize yes \
+                --logfile /tmp/redis.log \
+                --bind 127.0.0.1 \
+                --port "$redis_port" >/dev/null 2>&1 || true
+            sleep 1
+            ;;
+        Linux)
+            # Try systemd first (Ubuntu/Debian), fall back to direct daemon
+            if command -v systemctl >/dev/null 2>&1 && \
+               systemctl list-unit-files 2>/dev/null | grep -q '^redis'; then
+                sudo systemctl start redis-server 2>/dev/null || \
+                sudo systemctl start redis 2>/dev/null || true
+            else
+                redis-server --daemonize yes \
+                    --logfile /tmp/redis.log \
+                    --bind 127.0.0.1 \
+                    --port "$redis_port" >/dev/null 2>&1 || true
+            fi
+            sleep 1
+            ;;
+    esac
+
+    if redis-cli -h "$redis_host" -p "$redis_port" ping >/dev/null 2>&1; then
+        echo "✅ Redis started on $redis_host:$redis_port"
+    else
+        echo "[warn] Redis did not start — dashboard state persistence unavailable."
+    fi
 }
 
+# start_logging_stack — ensures log directory exists and Redis is running.
+# Logs are streamed from remote nodes via SSH tail and stored in Redis Streams.
 start_logging_stack() {
     local project_dir="$1"
-    local compose_file="$project_dir/logging/docker-compose.yml"
-
     mkdir -p "$project_dir/logging/cluster-logs"
-
-    echo ""
-    echo "📈 Starting logging infrastructure on controller..."
-
-    if [[ ! -f "$compose_file" ]]; then
-        echo "⚠️  Logging not configured (logging/docker-compose.yml not found)"
-        return 0
-    fi
-
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "⚠️  Docker CLI not found. Skipping centralized logging setup."
-        return 0
-    fi
-
-    if ! docker info >/dev/null 2>&1; then
-        echo "⚠️  Docker daemon not running. Skipping centralized logging setup."
-        return 0
-    fi
-
-    if ! resolve_compose_cmd; then
-        echo "⚠️  Neither 'docker compose' nor 'docker-compose' is available. Skipping centralized logging setup."
-        return 0
-    fi
-
-    if docker ps --format '{{.Names}}' | grep -qx 'loki'; then
-        echo "🧹 Cleaning up old logs from Loki..."
-        (cd "$project_dir/logging" && "${COMPOSE_CMD[@]}" down loki && docker volume rm logging_loki-data || true)
-        (cd "$project_dir/logging" && "${COMPOSE_CMD[@]}" up -d loki)
-        sleep 3
-        if curl -s http://localhost:3100/ready | grep -q "ready"; then
-            echo "✅ Loki restarted with fresh database"
-        else
-            echo "⚠️  Loki may not be ready yet, but continuing..."
-        fi
-
-        if ! docker ps --format '{{.Names}}' | grep -qx 'grafana'; then
-            (cd "$project_dir/logging" && "${COMPOSE_CMD[@]}" up -d grafana)
-            echo "📊 Grafana UI at http://localhost:3000 (admin/admin)"
-        fi
-        return 0
-    fi
-
-    echo "🚀 Starting Loki + Grafana..."
-    (cd "$project_dir/logging" && "${COMPOSE_CMD[@]}" up -d)
-    sleep 3
-    if curl -s http://localhost:3100/ready | grep -q "ready"; then
-        echo "✅ Loki ready at http://localhost:3100"
-        echo "📊 Grafana UI at http://localhost:3000 (admin/admin)"
-    else
-        echo "⚠️  Loki may not be ready yet, but continuing..."
-    fi
+    echo "📁 Log directory ready: $project_dir/logging/cluster-logs"
+    ensure_redis_running
 }

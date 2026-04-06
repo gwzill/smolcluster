@@ -1,7 +1,7 @@
 host_ip:
-  mini1: "10.10.0.1"
-  mini2: "10.10.0.2"
-  mini3: "10.10.0.3"
+  macmini1: "10.10.0.1"
+  mini2: 10.10.0.2
+  mini3: 10.10.0.3
   pi4: "10.10.0.1"
   macbook: "10.10.0.1"
   pi5: "192.168.50.1"
@@ -12,7 +12,7 @@ host_ip:
   jetson2: 10.10.1.2
 port:
   default: 65432
-  mini1: 65432
+  macmini1: 65432
   mini2: 65432
   mini3: 65432
   pi4: 65432
@@ -29,7 +29,7 @@ web_interface:
 
 # Network buffer sizes (in MB) - device-specific optimizations
 buffer_size:
-  mini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
+  macmini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
   mini2: 8  # Mac Mini - 8MB
   mini3: 8  # Mac Mini - 8MB
   macbook: 8  # MacBook - 8MB
@@ -49,18 +49,18 @@ metrics_log_interval: 50  # Log network metrics every N steps
 num_workers: 2
 total_num_nodes: 3
 
-server: jetson  # Server hostname (rank 0 for SyncPS inference)
+server: mini2    # Server hostname (rank 0 for SyncPS inference)
 workers:
   regular:
-  - hostname: jetson2
-    user: yuvrajsingh
+  - hostname: mini3
+    user: yuvrajsingh3
     rank: 1
-    ip: 10.10.1.2
+    ip: 10.10.0.3
     port: 65432
-  - hostname: jetson3
-    user: yuvrajsingh
+  - hostname: macmini1
+    user: macmini1
     rank: 2
-    ip: 10.10.1.3
+    ip: "10.10.0.1"
     port: 65432
   tablets: []
 

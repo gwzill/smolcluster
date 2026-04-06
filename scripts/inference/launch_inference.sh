@@ -12,6 +12,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG_FILE="$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_inference.yaml"
 
+# Load environment variables and log in to HuggingFace Hub (for gated models).
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+    set -a; source "$PROJECT_DIR/.env"; set +a
+fi
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/node_helpers.sh"
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/lib/logging_helpers.sh"
+NODE_HELPERS_PROJECT_DIR="$PROJECT_DIR"
+ensure_hf_login_local
+ensure_redis_running
+
 ALGORITHM="mp"
 DRY_RUN=false
 CLEANUP=false
@@ -54,8 +66,11 @@ done
 # ---------------------------------------------------------------------------
 do_cleanup() {
     echo ""
-    echo "🧹 Cleaning up ALL smolcluster inference sessions (syncps / classicdp / mp)..."
+    echo "🧹 Cleaning up ALL smolcluster sessions (training + inference)..."
     echo ""
+
+    # All smolcluster tmux session name patterns (training + inference + api/frontend)
+    local SMOL_PATTERN='^(server|worker[0-9]*|classicdp_worker[0-9]*|fsdp_worker[0-9]*|ep_worker[0-9]*|mp_pipeline_worker[0-9]*|syncps_inf_.*|classicdp_inf_.*|mp_inference_.*|mp_tablet_proxy[0-9]*|syncps_api|syncps_frontend|classicdp_api|classicdp_frontend|mp_api|mp_frontend)$'
 
     # Read ports from config (fall back to defaults if yq not available)
     local API_PORT=8000
@@ -67,24 +82,12 @@ do_cleanup() {
 
     # --- LOCAL tmux sessions ---
     echo "   Killing local tmux sessions..."
-    local EXACT_SESSIONS=(
-        syncps_api syncps_frontend
-        classicdp_api classicdp_frontend
-        mp_api mp_frontend
-    )
-    for session in "${EXACT_SESSIONS[@]}"; do
-        if tmux has-session -t "$session" 2>/dev/null; then
-            tmux kill-session -t "$session" 2>/dev/null
-            echo "   [OK] Killed: $session"
-        fi
-    done
-
-    # Pattern-matching local sessions (workers, tablets, server proxies)
-    tmux ls 2>/dev/null | cut -d: -f1 \
-        | grep -E '^(syncps_inf_|classicdp_inf_|mp_inference_|mp_tablet_proxy)' \
-        | while IFS= read -r s; do
-            tmux kill-session -t "$s" 2>/dev/null && echo "   [OK] Killed: $s"
-        done
+    local _killed=0
+    while IFS= read -r _s; do
+        [[ -z "$_s" ]] && continue
+        tmux kill-session -t "$_s" 2>/dev/null && echo "   [OK] Killed: $_s" && (( _killed++ )) || true
+    done < <(tmux ls 2>/dev/null | cut -d: -f1 | grep -E "$SMOL_PATTERN" || true)
+    [[ $_killed -eq 0 ]] && echo "   (no matching local sessions)"
 
     # --- LOCAL ports ---
     echo ""
@@ -106,33 +109,45 @@ do_cleanup() {
     # --- REMOTE tmux sessions via SSH ---
     echo ""
     echo "   Attempting remote cleanup on cluster nodes..."
+
+    # Collect SSH hosts: union of inference config + training configs
     local SSH_HOSTS=()
-    if [[ -f "$CONFIG_FILE" ]] && command -v yq >/dev/null 2>&1; then
+    local _seen_hosts=()
+    _add_hosts_from_config() {
+        local cfg="$1"
+        [[ -f "$cfg" ]] || return
+        command -v yq >/dev/null 2>&1 || return
         while IFS= read -r host; do
-            [[ -n "$host" && "$host" != "null" ]] && SSH_HOSTS+=("$host")
-        done < <(yq '.host_ip | keys | .[]' "$CONFIG_FILE" 2>/dev/null)
-    fi
+            [[ -z "$host" || "$host" == "null" ]] && continue
+            # skip duplicates
+            local _dup=0
+            for _h in "${_seen_hosts[@]}"; do [[ "$_h" == "$host" ]] && _dup=1 && break; done
+            [[ $_dup -eq 1 ]] && continue
+            _seen_hosts+=("$host")
+            SSH_HOSTS+=("$host")
+        done < <(yq '.host_ip | keys | .[]' "$cfg" 2>/dev/null || true)
+    }
+    _add_hosts_from_config "$CONFIG_FILE"
+    _add_hosts_from_config "$PROJECT_DIR/src/smolcluster/configs/cluster_config_syncps.yaml"
+    _add_hosts_from_config "$PROJECT_DIR/src/smolcluster/configs/cluster_config_mp.yaml"
+    _add_hosts_from_config "$PROJECT_DIR/src/smolcluster/configs/cluster_config_classicdp.yaml"
 
     if [[ ${#SSH_HOSTS[@]} -eq 0 ]]; then
-        echo "   [SKIP] No SSH hosts found in config"
+        echo "   [SKIP] No SSH hosts found in any config"
     else
+        local _remote_kill_cmd="tmux ls 2>/dev/null | cut -d: -f1 | grep -E '$SMOL_PATTERN' | while IFS= read -r _s; do tmux kill-session -t \"\$_s\" 2>/dev/null; done; echo ok"
         for host in "${SSH_HOSTS[@]}"; do
-            # ipad connects inbound — we don't SSH to it
             [[ "$host" == "ipad" ]] && continue
-            if ssh -o ConnectTimeout=3 -o BatchMode=yes "$host" \
-                "tmux ls 2>/dev/null | cut -d: -f1 \
-                 | grep -E '^(syncps_inf_|classicdp_inf_|mp_inference_|mp_tablet_proxy)' \
-                 | xargs -r -I{} tmux kill-session -t {} 2>/dev/null; echo ok" \
-                >/dev/null 2>&1; then
-                echo "   [OK] Remote sessions cleaned on: $host"
+            if ssh -o ConnectTimeout=3 -o BatchMode=yes "$host" "$_remote_kill_cmd" >/dev/null 2>&1; then
+                echo "   [OK] Remote cleanup done on: $host"
             else
-                echo "   [SKIP] $host unreachable or no matching sessions"
+                echo "   [SKIP] $host unreachable or SSH failed"
             fi
         done
     fi
 
     echo ""
-    echo "✅ All smolcluster inference sessions terminated and ports freed."
+    echo "✅ All smolcluster sessions terminated and ports freed."
     echo ""
 }
 

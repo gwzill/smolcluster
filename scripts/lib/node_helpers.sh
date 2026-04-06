@@ -17,8 +17,11 @@ init_node_helpers() {
         esac
     done < <(
         {
-            hostname -I 2>/dev/null | tr ' ' '\n'
-            ip -o -4 addr show up scope global 2>/dev/null | awk '{split($4, parts, "/"); print parts[1]}'
+            hostname -I 2>/dev/null | tr ' ' '\n'                                          # Linux
+            ip -o -4 addr show up scope global 2>/dev/null \
+                | awk '{split($4, parts, "/"); print parts[1]}'                            # Linux
+            ifconfig 2>/dev/null \
+                | awk '/inet / && !/127\.0\.0\.1/ {gsub("addr:",""); print $2}'           # macOS
         } | awk 'NF'
     )
 
@@ -156,5 +159,31 @@ node_command_hint() {
         echo "$local_command"
     else
         echo "ssh $node '$command'"
+    fi
+}
+
+# Log in to HuggingFace Hub on the local machine using HF_TOKEN from the environment.
+# Sets HUGGING_FACE_HUB_TOKEN as well so libraries that read either var work correctly.
+ensure_hf_login_local() {
+    if [[ -z "${HF_TOKEN:-}" ]]; then
+        echo "⚠️  HF_TOKEN is not set — skipping HuggingFace login (gated models will fail)"
+        return 0
+    fi
+    export HF_TOKEN
+    export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+    local _hf_cli
+    if [[ -x "${NODE_HELPERS_PROJECT_DIR:-}/.venv/bin/huggingface-cli" ]]; then
+        _hf_cli="${NODE_HELPERS_PROJECT_DIR}/.venv/bin/huggingface-cli"
+    elif command -v huggingface-cli >/dev/null 2>&1; then
+        _hf_cli="huggingface-cli"
+    else
+        echo "⚠️  huggingface-cli not found — skipping HuggingFace login (HF_TOKEN env var is still set)"
+        return 0
+    fi
+    if "$_hf_cli" login --token "$HF_TOKEN" --add-to-git-credential 2>&1 | grep -qE "(Login successful|Token is valid)"; then
+        echo "✅ HuggingFace login successful"
+    else
+        # Non-fatal: env var is set so the Python SDK will still pick it up
+        echo "⚠️  huggingface-cli login returned non-zero (token env var still set)"
     fi
 }

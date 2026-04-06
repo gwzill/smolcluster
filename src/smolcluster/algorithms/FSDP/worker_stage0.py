@@ -761,6 +761,10 @@ def run_fsdp_worker(
                     logger.info(
                         f"[Step {step}] Worker {worker_rank} sent averaged gradients to worker {peer_rank}"
                     )
+                # Rank-0 emits a dashboard ping via stdout so the SSH-tailed log
+                # stream carries it back to the controller machine.
+                if worker_rank == 0:
+                    print(f"[SMOL_PING] step={step}", flush=True)
 
                 logger.info(
                     f"[Step {step}] Worker {worker_rank} scatter-reduce complete"

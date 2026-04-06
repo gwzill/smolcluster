@@ -30,6 +30,9 @@ source "$PROJECT_DIR/scripts/lib/node_helpers.sh"
 source "$PROJECT_DIR/scripts/lib/logging_helpers.sh"
 init_node_helpers "$CONFIG_FILE" "$PROJECT_DIR" "$REMOTE_PROJECT_DIR"
 
+# Log in to HuggingFace Hub so gated models (e.g. Llama-2) can be downloaded.
+ensure_hf_login_local
+
 # Read configuration from YAML
 NUM_WORKERS=$(yq '.num_workers' "$CONFIG_FILE")
 
@@ -149,38 +152,8 @@ if [[ "$DRY_RUN" != "true" ]]; then
             exit 1
         fi
         
-        # Check if Promtail is installed on remote node
-        PROMTAIL_FOUND=false
-        if node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && (promtail --version || which promtail)" ; then
-            PROMTAIL_FOUND=true
-        fi
-        
-        if [[ "$PROMTAIL_FOUND" == "true" ]]; then
-            # Kill any existing Promtail processes (cleanup old/broken instances)
-            echo "🧹 $node: Cleaning up any existing Promtail processes and old logs..."
-            node_exec "$node" "(pkill -f '[p]romtail' 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n pkill -f '[p]romtail' 2>/dev/null) || true)" || true
-            node_exec "$node" "(rm -f $REMOTE_PROJECT_DIR/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null || (command -v sudo >/dev/null 2>&1 && sudo -n rm -f $REMOTE_PROJECT_DIR/logging/cluster-logs/*.log /tmp/promtail-positions.yaml /tmp/positions.yaml 2>/dev/null) || true)" || true
-            node_exec "$node" "mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs"
-            sleep 1
-            
-            # All nodes are workers in mp_pipeline
-            config_file="logging/promtail-worker-remote.yaml"
-            
-            # Start Promtail in background
-            echo "🚀 $node: Starting Promtail..."
-            node_exec "$node" "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:\$HOME/bin:\$PATH && nohup promtail -config.file=\$HOME/Desktop/smolcluster/$config_file > /tmp/promtail.log 2>&1 </dev/null &" &
-            sleep 2
-            
-            # Check if Promtail is running
-            if node_exec "$node" "pgrep -f promtail"; then
-                echo "✅ $node: Promtail started successfully"
-            else
-                echo "⚠️  $node: Promtail may not have started. Check /tmp/promtail.log on $node"
-            fi
-        else
-            echo "⚠️  Warning: Promtail not found on $node. Centralized logging will not work."
-            echo "   Install: See logging/SETUP.md"
-        fi
+        # Ensure log directory exists on remote node
+        node_exec "$node" "mkdir -p $REMOTE_PROJECT_DIR/logging/cluster-logs"
         
         # Check that venv exists and sync dependencies
         echo "📦 Checking venv on $node..."
@@ -227,7 +200,7 @@ required_packages = {
     "datasets": "4.4.2",
     "tqdm": None,
     "wandb": "0.17.0",
-    "pyyaml": None
+    "yaml": None
 }
 
 missing_packages = []
@@ -324,7 +297,17 @@ launch_on_node() {
         return 1
     }
     echo "✅ Launched $session_name on $node (logs: $log_file)"
-    
+
+    # Stream remote log to controller so the dashboard log tab can show it.
+    if ! node_is_local "$node"; then
+        local _local_log="$PROJECT_DIR/logging/cluster-logs/${session_name}__${node}.log"
+        rm -f "$_local_log"
+        ( sleep 2; ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+            -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+            "$node" "tail -F $log_file 2>/dev/null" >> "$_local_log" 2>/dev/null ) &
+        disown $! 2>/dev/null || true
+    fi
+
     # Give tmux a moment to start
     sleep 1
     

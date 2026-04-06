@@ -1,19 +1,18 @@
-syncPS:
-  host_ip:
-    mini1: "10.10.0.1"
-    mini2: "10.10.0.1"
-    mini3: "10.10.0.1"
-    pi4: "10.10.0.1"
-    macbook: "10.10.0.1"
-    pi5: "192.168.50.1"
-    win: "10.10.0.1"
-    ipad: "172.20.10.3"
-    jetson2: "10.10.1.2"
-    jetson3: "10.10.1.3"
+host_ip:
+  macmini1: "10.10.0.1"
+  mini2: "10.10.0.1"
+  mini3: "10.10.0.1"
+  pi4: "10.10.0.1"
+  macbook: "10.10.0.1"
+  pi5: "192.168.50.1"
+  win: "10.10.0.1"
+  ipad: "172.20.10.3"
+  jetson2: "10.10.1.2"
+  jetson3: "10.10.1.3"
 
 port:
   default: 65432
-  mini1: 65432
+  macmini1: 65432
   mini2: 65432
   mini3: 65432
   pi4: 65432
@@ -24,7 +23,7 @@ port:
 
 # Network buffer sizes (in MB) - device-specific optimizations
 buffer_size:
-  mini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
+  macmini1: 8  # Mac Mini - 8MB (Thunderbolt 40Gbps)
   mini2: 8  # Mac Mini - 8MB
   mini3: 8  # Mac Mini - 8MB
   macbook: 8  # MacBook - 8MB
@@ -61,24 +60,19 @@ num_workers: 3
 allToAllTopology:
   workers:
     regular:
-      - hostname: jetson
-        rank: 0
-        port: 65432
-        ip: "10.10.1.1"
-      - hostname: jetson2
-        rank: 1
-        port: 65433
-        ip: "10.10.1.2"
-      - hostname: jetson3
-        rank: 2
-        port: 65434
-        ip: "10.10.1.3"
-      # - hostname: mini3
-      #   rank: 2
-      #   port: 65434
-      #   ip: "10.10.0.3"
-
-#Model parallelism specific configs
+    - hostname: mini2
+      rank: 0
+      ip: 10.10.0.2
+      port: 65432
+    - hostname: mini3
+      rank: 1
+      ip: 10.10.0.3
+      port: 65433
+    - hostname: macmini1
+      rank: 2
+      ip: "10.10.0.1"
+      port: 65434
+    tablets: []
 num_nodes: 3  # Total number of nodes in the cluster (auto-detected from config, this is just for reference)
 num_layers: 6  # Number of transformer blocks (auto-detected from model, this is just for reference)
-model_name: causal_gpt2 
+model_name: causal_gpt2

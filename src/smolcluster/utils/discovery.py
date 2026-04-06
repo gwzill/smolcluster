@@ -331,26 +331,46 @@ class NodeDiscovery:
             return
 
         with self._lock:
-            existing = self.nodes.get(hostname, {})
-            # smolcluster registration takes priority over passive SSH discovery
-            if existing.get("role") in ("server", "worker") and svc_type != SERVICE_TYPE:
-                return
-            # Don't downgrade a good LAN IP to a link-local one
-            existing_ip = existing.get("ip", "")
-            if existing_ip and not existing_ip.startswith("169.254.") and ip.startswith("169.254."):
-                ip = existing_ip
-            node = {
-                "hostname": hostname,
-                "ip": ip,
-                "port": info.port,
-                "os": props.get("os", existing.get("os", _guess_os(props))),
-                "os_version": props.get("os_version", existing.get("os_version", "")),
-                "machine": props.get("machine", existing.get("machine", "")),
-                "role": props.get("role", existing.get("role", "available")),
-                # mDNS-discovered entries are not from ssh_config
-                "source": "mdns",
-            }
-            self.nodes[hostname] = node
+            # Check if an SSH-config seeded entry already exists for this IP.
+            # If so, enrich it in-place under its alias key rather than creating
+            # a duplicate entry under the mDNS hostname.
+            ssh_alias_key = None
+            if ip:
+                for k, v in self.nodes.items():
+                    if v.get("source") == "ssh_config" and v.get("ip") == ip and k != hostname:
+                        ssh_alias_key = k
+                        break
+
+            if ssh_alias_key:
+                entry = self.nodes[ssh_alias_key]
+                # Upgrade OS/machine info from mDNS without changing the alias key
+                entry["os"]         = props.get("os", entry.get("os") or _guess_os(props))
+                entry["os_version"] = props.get("os_version", entry.get("os_version", ""))
+                entry["machine"]    = props.get("machine", entry.get("machine", ""))
+                entry["source"]     = "mdns"
+                # Remove any stale mDNS-keyed duplicate for this same hostname
+                self.nodes.pop(hostname, None)
+            else:
+                existing = self.nodes.get(hostname, {})
+                # smolcluster registration takes priority over passive SSH discovery
+                if existing.get("role") in ("server", "worker") and svc_type != SERVICE_TYPE:
+                    return
+                # Don't downgrade a good LAN IP to a link-local one
+                existing_ip = existing.get("ip", "")
+                if existing_ip and not existing_ip.startswith("169.254.") and ip.startswith("169.254."):
+                    ip = existing_ip
+                node = {
+                    "hostname": hostname,
+                    "ip": ip,
+                    "port": info.port,
+                    "os": props.get("os", existing.get("os", _guess_os(props))),
+                    "os_version": props.get("os_version", existing.get("os_version", "")),
+                    "machine": props.get("machine", existing.get("machine", "")),
+                    "role": props.get("role", existing.get("role", "available")),
+                    # mDNS-discovered entries are not from ssh_config
+                    "source": "mdns",
+                }
+                self.nodes[hostname] = node
 
         logger.info(f"[discovery] Found node: {hostname} ({ip}) via {svc_type}")
         if self._on_change:

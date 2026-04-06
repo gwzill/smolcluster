@@ -16,6 +16,11 @@ scrape_configs:
         labels:
           job: smolcluster
           __path__: /home/*/Desktop/smolcluster/logging/cluster-logs/*.log
+      - targets:
+          - localhost
+        labels:
+          job: smolcluster
+          __path__: /Users/*/Desktop/smolcluster/logging/cluster-logs/*.log
 
     pipeline_stages:
       - regex:
