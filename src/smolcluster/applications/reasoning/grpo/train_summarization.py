@@ -262,12 +262,13 @@ def _build_completion_mask(
 
 
 def _compute_single_reward(
-    args: Tuple[int, str, str, str],
+    args: Tuple[int, str, str, str, Any],
 ) -> Tuple[int, float, dict]:
-    idx, question, generated_text, true_answer = args
+    idx, question, generated_text, true_answer, tokenizer = args
     quality_reward = calculate_summary_quality(generated_text, true_answer)
-    length_penalty = calculate_length_reward(generated_text, MAX_LENGTH_OF_SUMMARIZATION)
-    total_reward = float(quality_reward + length_penalty)
+    quality_reward = -1
+    length_penalty = calculate_length_reward(generated_text, MAX_LENGTH_OF_SUMMARIZATION, tokenizer=tokenizer)
+    # total_reward = float(quality_reward + length_penalty)
     total_reward = float(length_penalty)
     log_record = {
         "rollout_idx":    idx,
@@ -289,12 +290,13 @@ def compute_rewards(
     max_workers: Optional[int] = None,
     step: Optional[int] = None,
     rollout_questions: Optional[List[str]] = None,
+    tokenizer: Optional[Any] = None,
 ) -> Tuple[mx.array, Dict[str, List[float]]]:
     """Returns (reward_tensor [T*C], components) where components has per-rollout
     lists for each reward term (quality_reward, length_penalty, total_reward)."""
     questions = rollout_questions if rollout_questions is not None else [""] * len(rollout_texts)
     indexed_args = [
-        (i, q, text, target)
+        (i, q, text, target, tokenizer)
         for i, (q, text, target) in enumerate(zip(questions, rollout_texts, rollout_targets))
     ]
 
@@ -368,6 +370,7 @@ def evaluate_batch(
         max_workers=config.get("reward_workers"),
         step=step,
         rollout_questions=rollout_questions,
+        tokenizer=tokenizer,
     )
     rewards = rewards_flat.reshape(T, C)          # [T, C]
     advantages = compute_advantages(rewards, dtype=dtype)  # [T, C]
@@ -508,6 +511,7 @@ def train_step(
         max_workers=config.get("reward_workers"),
         step=step,
         rollout_questions=rollout_questions,
+        tokenizer=tokenizer,
     )
     rewards = rewards_flat.reshape(T, C)          # [T, C]
     logger.info(
