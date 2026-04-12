@@ -1,5 +1,6 @@
 """GRPO training utilities."""
 
+from smolcluster.utils.logging_utils import setup_logging
 from .training_utils import (
     _add_grads,
     _log_mem,
@@ -43,4 +44,5 @@ __all__ = [
     "set_global_seed",
     "GradScaler",
     "MasterWeightAdamW",
+    "setup_logging",
 ]

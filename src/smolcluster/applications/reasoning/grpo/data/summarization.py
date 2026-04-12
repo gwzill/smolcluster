@@ -1,7 +1,10 @@
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from datasets import load_dataset
+
+logger = logging.getLogger(__name__)
 
 
 PROMPT = (
@@ -26,7 +29,7 @@ def _format_prompt(question: str, tokenizer: Optional[Any]) -> str:
             )
     # Fallback for tokenizers without chat template support
     except Exception as e:
-        logger.error(e)
+        logger.error("[data] chat-template formatting failed, returning None: %s", e)
 
 
 

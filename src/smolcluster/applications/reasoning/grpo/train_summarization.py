@@ -49,6 +49,7 @@ from smolcluster.applications.reasoning.grpo.utils.worker_sync import (
     save_policy_weights,
     sync_and_reload_workers,
 )
+from smolcluster.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +80,19 @@ def _append_answers_log(record: dict) -> None:
 
 
 def _compute_single_reward(
-    args: Tuple[int, str, str, str, Any],
+    args: Tuple[int, str, str, str, Any, bool, bool, bool],
 ) -> Tuple[int, float, dict]:
-    idx, question, generated_text, true_answer, tokenizer = args
-    quality_reward = calculate_summary_quality(generated_text, true_answer)
-    quality_reward = -1
+    idx, question, generated_text, true_answer, tokenizer, use_rouge, use_meteor, use_bleu = args
+    quality_scores = calculate_summary_quality(
+        generated_text, true_answer,
+        use_rouge=use_rouge, use_meteor=use_meteor, use_bleu=use_bleu,
+    )
     length_penalty = calculate_length_reward(generated_text, MAX_LENGTH_OF_SUMMARIZATION, tokenizer=tokenizer)
-    # total_reward = float(quality_reward + length_penalty)
-    total_reward = float(length_penalty)
+    total_reward = float(sum(quality_scores.values()) + length_penalty)
     log_record = {
         "rollout_idx":    idx,
         "question":       question,
-        "quality_reward": float(quality_reward),
+        **{f"quality_{k}": v for k, v in quality_scores.items()},
         "length_penalty": float(length_penalty),
         "total_reward":   total_reward,
         "generated_text": generated_text,
@@ -108,12 +110,15 @@ def compute_rewards(
     step: Optional[int] = None,
     rollout_questions: Optional[List[str]] = None,
     tokenizer: Optional[Any] = None,
+    use_rouge: bool = False,
+    use_meteor: bool = False,
+    use_bleu: bool = False,
 ) -> Tuple[mx.array, Dict[str, List[float]]]:
     """Returns (reward_tensor [T*C], components) where components has per-rollout
-    lists for each reward term (quality_reward, length_penalty, total_reward)."""
+    lists for each enabled quality metric plus length_penalty and total_reward."""
     questions = rollout_questions if rollout_questions is not None else [""] * len(rollout_texts)
     indexed_args = [
-        (i, q, text, target, tokenizer)
+        (i, q, text, target, tokenizer, use_rouge, use_meteor, use_bleu)
         for i, (q, text, target) in enumerate(zip(questions, rollout_texts, rollout_targets))
     ]
 
@@ -128,8 +133,10 @@ def compute_rewards(
 
     _append_answers_log({"step": step, "rollouts": log_records})
 
+    # Union of quality keys across all records (safe regardless of which metrics are on)
+    quality_keys = sorted({k for r in log_records for k in r if k.startswith("quality_")})
     components: Dict[str, List[float]] = {
-        "quality_reward": [r["quality_reward"] for r in log_records],
+        **{k: [r[k] for r in log_records] for k in quality_keys},
         "length_penalty": [r["length_penalty"] for r in log_records],
         "total_reward":   [r["total_reward"]   for r in log_records],
     }
@@ -179,6 +186,7 @@ def evaluate_batch(
 
     curr_logprobs = compute_logprobs(model, input_ids, attention_mask, dtype=dtype, completion_mask=completion_mask)  # [T, C]
 
+    _qm = config.get("quality_metrics", {})
     rewards_flat, reward_components = compute_rewards(
         rollout_texts,
         rollout_targets,
@@ -188,6 +196,9 @@ def evaluate_batch(
         step=step,
         rollout_questions=rollout_questions,
         tokenizer=tokenizer,
+        use_rouge=bool(_qm.get("rouge", False)),
+        use_meteor=bool(_qm.get("meteor", False)),
+        use_bleu=bool(_qm.get("bleu", False)),
     )
     rewards = rewards_flat.reshape(T, C)          # [T, C]
     advantages = compute_advantages(rewards, dtype=dtype)  # [T, C]
@@ -282,6 +293,7 @@ def train_step(
     _log_mem("train_step: after tokenize_rollouts")
 
     logger.info("%s Computing rewards ...", step_tag)
+    _qm = config.get("quality_metrics", {})
     rewards_flat, reward_components = compute_rewards(
         rollout_texts,
         rollout_targets,
@@ -291,6 +303,9 @@ def train_step(
         step=step,
         rollout_questions=rollout_questions,
         tokenizer=tokenizer,
+        use_rouge=bool(_qm.get("rouge", False)),
+        use_meteor=bool(_qm.get("meteor", False)),
+        use_bleu=bool(_qm.get("bleu", False)),
     )
     rewards = rewards_flat.reshape(T, C)          # [T, C]
     logger.info(
@@ -396,7 +411,6 @@ def train_step(
     # ---- extra diagnostics (no grad needed) --------------------------------
     # completion_mask is [T, C, D]; sum over token dim → per-rollout completion lengths [T, C]
     lengths = mx.sum(completion_mask, axis=-1).astype(dtype)
-    qr = mx.array(reward_components["quality_reward"]) if reward_components else None
     lp = mx.array(reward_components["length_penalty"]) if reward_components else None
     metrics_extra: Dict[str, float] = {
         "reward_std":       float(mx.std(rewards).item()),
@@ -405,16 +419,20 @@ def train_step(
         "advantage_mean":   float(mx.mean(advantages).item()),
         "advantage_std":    float(mx.std(advantages).item()),
         "generation_token_len_mean": float(mx.mean(lengths).item()),
-        "generation_token_len_min": float(mx.min(lengths).item()),
+        "generation_token_len_min":  float(mx.min(lengths).item()),
         "generation_token_len_max":  float(mx.max(lengths).item()),
-        "quality_reward_mean": float(mx.mean(qr).item()) if qr is not None else 0,
-        "quality_reward_std":  float(mx.std(qr).item())  if qr is not None else 0,
-        "quality_reward_min":  float(mx.min(qr).item())  if qr is not None else 0,
-        "quality_reward_max":  float(mx.max(qr).item())  if qr is not None else 0,
         "length_penalty_mean": float(mx.mean(lp).item()) if lp is not None else 0,
         "length_penalty_min":  float(mx.min(lp).item())  if lp is not None else 0,
         "length_penalty_max":  float(mx.max(lp).item())  if lp is not None else 0,
     }
+    # Per-metric quality stats (rouge_l, meteor, bleu — whatever was enabled)
+    if reward_components:
+        for key in [k for k in reward_components if k.startswith("quality_")]:
+            arr = mx.array(reward_components[key])
+            metrics_extra[f"{key}_mean"] = float(mx.mean(arr).item())
+            metrics_extra[f"{key}_std"]  = float(mx.std(arr).item())
+            metrics_extra[f"{key}_min"]  = float(mx.min(arr).item())
+            metrics_extra[f"{key}_max"]  = float(mx.max(arr).item())
     # Ratio stats: curr vs old policy (always available now)
     curr_lps_flat = mx.concatenate([lp.reshape(-1) for lp in curr_lps])  # [T*C]
     old_flat = old_logprobs.reshape(-1)                             # [T*C]
@@ -692,7 +710,7 @@ def train(
                 logger.info("[checkpoint] Step %d — saving policy weights ...", global_step)
                 try:
                     # Periodic saves overwrite a stable "latest" checkpoint.
-                    weights_dir = save_policy_weights(model, checkpoint_dir, "latest")
+                    weights_dir = save_policy_weights(model, checkpoint_dir, "latest", tokenizer=tokenizer, model_cfg=model_cfg)
 
                     # Periodically reload vLLM workers so rollouts always come
                     # from the most recent policy.
@@ -725,6 +743,11 @@ def train(
                 amp_scale=f"{(scaler.get_scale() if scaler else 1.0):.0f}",
                 skipped=int(skipped_update),
             )
+            quality_wandb = {
+                f"rewards/{k}": metrics.get(k, 0)
+                for k in metrics
+                if k.startswith("quality_")
+            }
             wandb.log(
                 {
                     "train/loss":             metrics["loss"],
@@ -732,10 +755,7 @@ def train(
                     "rewards/reward_std":       metrics.get("reward_std", 0),
                     "rewards/reward_min":       metrics.get("reward_min", 0),
                     "rewards/reward_max":       metrics.get("reward_max", 0),
-                    "rewards/quality_reward_mean": metrics.get("quality_reward_mean", 0),
-                    "rewards/quality_reward_std":  metrics.get("quality_reward_std",  0),
-                    "rewards/quality_reward_min":  metrics.get("quality_reward_min",  0),
-                    "rewards/quality_reward_max":  metrics.get("quality_reward_max",  0),
+                    **quality_wandb,
                     "rewards/length_penalty_mean": metrics.get("length_penalty_mean", 0),
                     "rewards/length_penalty_min":  metrics.get("length_penalty_min",  0),
                     "rewards/length_penalty_max":  metrics.get("length_penalty_max",  0),
@@ -779,8 +799,7 @@ def main() -> None:
         _log.write_text("", encoding="utf-8")
     
     
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logging.getLogger().setLevel(logging.INFO)
+    setup_logging(force=True)
 
     if mx.metal.is_available():
         mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
@@ -797,7 +816,7 @@ def main() -> None:
     dtype = get_dtype_from_config(grpo_config)
     logger.info("Using dtype: %s", dtype)
 
-    model, ref_model, tokenizer = load_model(dtype, grpo_config, model_config)
+    model, ref_model, tokenizer, model_cfg = load_model(dtype, grpo_config, model_config)
     train_examples, val_examples = build_train_val_examples(
         grpo_config["data"], seed=seed, tokenizer=tokenizer
     )

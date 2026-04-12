@@ -28,7 +28,8 @@ def extract_answer_from_gsm8k(gsm8k_answer: str) -> Optional[float]:
     try:
         return float(match.group(1).strip().replace(",", ""))
     except ValueError:
-        return logger.error(f"Failed to parse answer from GSM8K response: {gsm8k_answer}")
+        logger.warning("[data] Failed to parse GSM8K answer as float: %.80r", gsm8k_answer)
+        return None
     
 
 def _format_prompt(question: str, tokenizer: Optional[Any]) -> str:
@@ -46,7 +47,7 @@ def _format_prompt(question: str, tokenizer: Optional[Any]) -> str:
             )
     # Fallback for tokenizers without chat template support
     except Exception as e:
-        logger.error(e)
+        logger.error("[data] chat-template formatting failed, returning None: %s", e)
 
 
 

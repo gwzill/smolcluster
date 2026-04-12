@@ -33,7 +33,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import mlx.core as mx
 import requests
@@ -66,9 +66,16 @@ _DEFAULT_VLLM_START_CMD = (
 # Weight saving
 # ---------------------------------------------------------------------------
 
-def save_policy_weights(model: Any, checkpoint_dir: str, step: Union[int, str]) -> Path:
+def save_policy_weights(
+    model: Any,
+    checkpoint_dir: str,
+    step: Union[int, str],
+    tokenizer: Optional[Any] = None,
+    model_cfg: Optional[Dict[str, Any]] = None,
+) -> Path:
     """
-    Save policy weights (or LoRA adapters for quantized models) as safetensors.
+    Save policy weights (or LoRA adapters for quantized models) as safetensors,
+    along with config.json and tokenizer files derived from the live model state.
 
     For quantized models with LoRA adapters (detected via the presence of a
     ``fuse`` method on any module), saves only the trainable adapter weights
@@ -76,14 +83,24 @@ def save_policy_weights(model: Any, checkpoint_dir: str, step: Union[int, str]) 
     load the unchanged 4-bit base model and overlay the adapters via
     ``--adapter-path``.
 
-    For non-quantized models, saves the full ``model.safetensors`` (existing
-    behaviour).
+    For non-quantized models, saves the full ``model.safetensors`` plus
+    config.json (written from ``model_cfg``, which includes quantization
+    metadata for 4-bit models) and tokenizer files via
+    ``tokenizer.save_pretrained()``.  This avoids copying stale files from the
+    HF cache, which would drop quantization config or other runtime changes.
 
     Args:
         model:          The MLX policy model (not the reference model).
         checkpoint_dir: Path relative to the project root where checkpoints are stored.
         step:           Current global training step (int) or a stable label (str)
                 used to name the subdirectory.
+        tokenizer:      The tokenizer returned by ``mlx_lm.load()``.  When
+                provided, ``tokenizer.save_pretrained()`` writes all tokenizer
+                files into the checkpoint directory.
+        model_cfg:      The raw HF config dict returned by
+                ``mlx_lm.load(..., return_config=True)``.  Written as
+                ``config.json`` so the checkpoint reflects the actual loaded
+                model (e.g. quantization group size / bits for 4-bit models).
 
     Returns:
         The checkpoint directory that was written, e.g.
@@ -91,6 +108,7 @@ def save_policy_weights(model: Any, checkpoint_dir: str, step: Union[int, str]) 
         ``<project_root>/checkpoints/grpo/latest/``.
     """
     import json
+    from mlx_lm.utils import save_config as mlx_save_config
 
     step_dir_name = f"step_{step}" if isinstance(step, int) else str(step)
     step_dir = _project_root / checkpoint_dir / step_dir_name
@@ -121,39 +139,32 @@ def save_policy_weights(model: Any, checkpoint_dir: str, step: Union[int, str]) 
         logger.info("[weight_sync] Checkpoint %s — LoRA adapters saved to %s", step_dir_name, adapter_dir)
         return step_dir
 
-    # Non-quantized model: full weight save (existing behaviour)
+    # Non-quantized model: full weight save
     weights_path = step_dir / "model.safetensors"
     flat_weights = dict(tree_flatten(model.parameters()))
     # Force evaluation so all pending MLX operations complete before we write.
     mx.eval(list(flat_weights.values()))
     mx.save_safetensors(str(weights_path), flat_weights)
     logger.info("[weight_sync] Checkpoint %s — weights saved to %s", step_dir_name, weights_path)
+
+    # Write config.json from the live model config (includes quantization metadata).
+    if model_cfg is not None:
+        try:
+            mlx_save_config(model_cfg, step_dir / "config.json")
+            logger.info("[weight_sync] Checkpoint %s — config.json written from model_cfg", step_dir_name)
+        except Exception as exc:
+            logger.warning("[weight_sync] Could not write config.json: %s", exc)
+
+    # Save tokenizer files via save_pretrained so they always match the loaded tokenizer.
+    if tokenizer is not None:
+        try:
+            tokenizer.save_pretrained(str(step_dir))
+            logger.info("[weight_sync] Checkpoint %s — tokenizer files saved", step_dir_name)
+        except Exception as exc:
+            logger.warning("[weight_sync] Could not save tokenizer files: %s", exc)
+
     return step_dir
 
-
-def _get_local_model_dir(model_name: str) -> Path:
-    """
-    Locate the local HF cache directory for a model.
-    Assumes the model is already cached locally at ~/.cache/huggingface/hub/models--{org}--{model}.
-    Returns the latest snapshot directory (containing symlinks to actual model files).
-    """
-    
-    hf_home = Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface"))
-    # Model repo dirs are stored as models--{org}--{model_name} (with / converted to --)
-    cache_name = model_name.replace("/", "--")
-    base_model_dir = hf_home / "hub" / f"models--{cache_name}"
-    
-    snapshots_dir = base_model_dir / "snapshots"
-    if not snapshots_dir.exists():
-        raise RuntimeError(f"No snapshots directory found at {snapshots_dir}")
-    
-    # Get the latest snapshot (there should be only one for a given model)
-    snapshots = list(snapshots_dir.iterdir())
-    if not snapshots:
-        raise RuntimeError(f"No snapshot subdirectories found in {snapshots_dir}")
-    
-    latest_snapshot = snapshots[0]  # Assume single snapshot; if multiple, get most recent
-    return latest_snapshot
 
 
 def _scp_model_files(

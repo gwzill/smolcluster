@@ -286,12 +286,6 @@ if [[ ! -f "$MODEL_CONFIG" ]]; then
     exit 1
 fi
 
-VENV_ACTIVATE="$PROJECT_DIR/.venv/bin/activate"
-if [[ ! -f "$VENV_ACTIVATE" ]]; then
-    echo "Error: .venv not found at $PROJECT_DIR/.venv"
-    echo "Run 'uv sync --extra mlx' inside $PROJECT_DIR to create it."
-    exit 1
-fi
 
 VLLM_ENABLED=$(yq '.vllm' "$GRPO_CONFIG")
 NUM_WORKERS=$(yq '.num_workers' "$CLUSTER_CONFIG")
@@ -483,9 +477,6 @@ fi
 
 cd "$PROJECT_DIR"
 mkdir -p "$PROJECT_DIR/src/smolcluster/applications/reasoning/grpo/evaluation/eval-rollouts"
-echo ""
-echo "Installing dependencies..."
-uv pip install -e .
 
 HF_ENV_SETUP=()
 if [[ -n "${HF_TOKEN:-}" ]]; then
@@ -508,20 +499,19 @@ else
     echo "  SFT adapters enabled: NO"
 fi
 
+UV_RUN="env ${HF_ENV_SETUP[*]+${HF_ENV_SETUP[*]}} uv run --group mlx --group eval python"
+
 if [[ "$DRY_RUN" == "true" ]]; then
-    printf 'Dry run command: %q ' env "${HF_ENV_SETUP[@]}" bash -lc "source \"$VENV_ACTIVATE\" && python \"$EVAL_SCRIPT\""
+    printf 'Dry run command: %s %q' "$UV_RUN" "$EVAL_SCRIPT"
     if [[ ${#EVAL_ARGS[@]} -gt 0 ]]; then
-        printf '%q ' "${EVAL_ARGS[@]}"
+        printf ' %q' "${EVAL_ARGS[@]}"
     fi
     echo ""
     exit 0
 fi
 
-set +u
-source "$VENV_ACTIVATE"
-set -u
 if [[ ${#EVAL_ARGS[@]} -gt 0 ]]; then
-    env "${HF_ENV_SETUP[@]}" python "$EVAL_SCRIPT" "${EVAL_ARGS[@]}"
+    env "${HF_ENV_SETUP[@]}" uv run --group mlx --group eval python "$EVAL_SCRIPT" "${EVAL_ARGS[@]}"
 else
-    env "${HF_ENV_SETUP[@]}" python "$EVAL_SCRIPT"
+    env "${HF_ENV_SETUP[@]}" uv run --group mlx --group eval python "$EVAL_SCRIPT"
 fi

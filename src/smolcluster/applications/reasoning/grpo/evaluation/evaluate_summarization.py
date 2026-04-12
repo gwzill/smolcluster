@@ -52,8 +52,9 @@ from smolcluster.applications.reasoning.grpo.utils.evaluation_utils import (
     save_significance_report,
     save_summary,
 )
+from smolcluster.utils.logging_utils import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
+setup_logging()
 logger = logging.getLogger(__name__)
 
 _EVAL_ROLLOUTS_DIR = _script_dir / "eval-rollouts"

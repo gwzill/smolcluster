@@ -1,19 +1,105 @@
 """Centralized logging configuration for smolcluster."""
 
 import logging
+import re
+import sys
 from pathlib import Path
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# ANSI colour palette
+# ---------------------------------------------------------------------------
+
+_RESET = "\033[0m"
+
+_LEVEL_COLOURS = {
+    logging.DEBUG:    "\033[36m",    # cyan
+    logging.INFO:     "\033[32m",    # green
+    logging.WARNING:  "\033[33m",    # yellow
+    logging.ERROR:    "\033[31m",    # red
+    logging.CRITICAL: "\033[1;31m",  # bold red
+}
+
+_TAG_COLOUR = "\033[35m"   # magenta — for bracketed tags like [MODEL], [LORA]
+_DIM = "\033[2m"
+
+
+class ColourFormatter(logging.Formatter):
+    """Single-line coloured formatter.
+
+    Format:  HH:MM:SS  LEVEL     logger.name  message
+    Bracketed tags like [MODEL], [checkpoint], [vllm worker 0] are highlighted.
+    """
+
+    _FMT = "{dim}{asctime}{reset}  {level_col}{levelname:<8}{reset}  {dim}{name}{reset}  {msg}"
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+        record.message = record.getMessage()
+        record.asctime = self.formatTime(record, "%H:%M:%S")
+
+        msg = re.sub(
+            r"(\[[^\]]{1,40}\])",
+            rf"{_TAG_COLOUR}\1{_RESET}",
+            record.message,
+        )
+
+        line = self._FMT.format(
+            dim=_DIM,
+            asctime=record.asctime,
+            reset=_RESET,
+            level_col=_LEVEL_COLOURS.get(record.levelno, ""),
+            levelname=record.levelname,
+            name=record.name,
+            msg=msg,
+        )
+
+        if record.exc_info:
+            line = f"{line}\n{_LEVEL_COLOURS.get(logging.ERROR, '')}{self.formatException(record.exc_info)}{_RESET}"
+
+        return line
+
+
+def setup_logging(
+    level: int = logging.INFO,
+    *,
+    force: bool = False,
+) -> None:
+    """Configure the root logger with a coloured console handler.
+
+    Call once from the main entry-point of each script.
+    Subsequent calls are no-ops unless ``force=True``.
+    """
+    root = logging.getLogger()
+
+    if root.handlers and not force:
+        return
+
+    if force:
+        root.handlers.clear()
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(ColourFormatter())
+    root.addHandler(handler)
+    root.setLevel(level)
+
+    # Quieten noisy third-party loggers
+    for noisy in ("httpx", "httpcore", "urllib3", "filelock", "datasets", "huggingface_hub"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# Cluster / Loki logging (file-based, structured for Promtail)
+# ---------------------------------------------------------------------------
 
 class RankFilter(logging.Filter):
-    """Add rank information to log records."""
+    """Attach rank and component fields to every log record."""
 
     def __init__(self, rank: Optional[int] = None, component: str = "server"):
         super().__init__()
         self.rank = rank if rank is not None else -1
         self.component = component
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         record.rank = self.rank
         record.component = self.component
         return True
@@ -27,164 +113,54 @@ def setup_cluster_logging(
     log_dir: Optional[str] = None,
     level: int = logging.INFO,
 ) -> None:
-    """
-    Add file logging to existing logger with structured format for Loki.
-    Does NOT start infrastructure - assumes Promtail is running to ship logs.
+    """Add structured file logging to an existing logger for Loki/Promtail ingestion."""
 
-    Args:
-        logger: Existing logger to configure
-        component: "server" or "worker"
-        rank: Worker rank (None for server)
-        hostname: Machine hostname
-        log_dir: Directory for log files
-        level: Logging level
-    """
-    def project_log_dir() -> Path:
-        # src/smolcluster/utils/logging_utils.py -> repository root is parents[3]
-        repo_root = Path(__file__).resolve().parents[3]
-        return repo_root / "logging" / "cluster-logs"
+    def _project_log_dir() -> Path:
+        return Path(__file__).resolve().parents[3] / "logging" / "cluster-logs"
 
-    def pick_writable_log_dir(preferred_dir: Optional[str]) -> Path:
-        """Return a writable directory for cluster logs."""
-        default_dir = project_log_dir()
-        preferred_path = Path(preferred_dir) if preferred_dir else default_dir
-
-        candidates = [
-            preferred_path,
-            default_dir,
-            Path.cwd() / "smolcluster-logs",
-        ]
-
-        for candidate in candidates:
+    def _pick_writable(preferred: Optional[str]) -> Path:
+        default = _project_log_dir()
+        for candidate in [Path(preferred) if preferred else default, default, Path.cwd() / "smolcluster-logs"]:
             try:
                 candidate.mkdir(parents=True, exist_ok=True)
-                probe = candidate / ".smolcluster_write_probe"
-                with probe.open("a", encoding="utf-8"):
-                    pass
+                probe = candidate / ".write_probe"
+                probe.open("a").close()
                 probe.unlink(missing_ok=True)
                 return candidate
             except OSError:
                 continue
+        raise OSError("No writable directory found for cluster logs")
 
-        raise OSError("Could not find a writable directory for cluster logs")
+    log_file = _pick_writable(log_dir) / (
+        f"server-{hostname or 'unknown'}.log" if component == "server"
+        else f"worker-rank{rank}-{hostname or 'unknown'}.log"
+    )
 
-    writable_log_dir = pick_writable_log_dir(log_dir)
+    # Avoid duplicate handlers
+    if any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_file) for h in logger.handlers):
+        return
 
-    # Determine log file name
-    if component == "server":
-        log_file = writable_log_dir / f"server-{hostname or 'unknown'}.log"
-    else:
-        log_file = writable_log_dir / f"worker-rank{rank}-{hostname or 'unknown'}.log"
+    logger.addFilter(RankFilter(rank=rank, component=component))
 
-    # Check if file handler already exists for this logger
-    for handler in logger.handlers:
-        if isinstance(handler, logging.FileHandler) and handler.baseFilename == str(
-            log_file
-        ):
-            logger.info(f"📝 Logging already configured for: {log_file}")
-            return
-
-    # Add rank filter
-    rank_filter = RankFilter(rank=rank, component=component)
-    logger.addFilter(rank_filter)
-
-    # File handler (structured for Loki)
     try:
-        file_handler = logging.FileHandler(log_file, mode="a")
+        fh = logging.FileHandler(log_file, mode="a")
     except PermissionError:
-        # If selected file becomes unwritable between probe and open, retry
-        # in repository-local fallback so logs never go to /tmp.
-        emergency_dir = pick_writable_log_dir(
-            str(Path(__file__).resolve().parents[3] / "logging" / "cluster-logs-fallback")
-        )
-        log_file = emergency_dir / log_file.name
-        file_handler = logging.FileHandler(log_file, mode="a")
-    file_handler.setLevel(level)
+        fallback = _pick_writable(str(_project_log_dir().parent / "cluster-logs-fallback"))
+        fh = logging.FileHandler(fallback / log_file.name, mode="a")
 
-    # Structured format: timestamp | level | rank:X | step:Y | message
-    # This makes it easy for Loki to parse and add labels
-    if component == "server":
-        file_formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)s | rank:server | %(message)s"
-        )
-    else:
-        file_formatter = logging.Formatter(
-            f"%(asctime)s | %(levelname)s | rank:{rank} | %(message)s"
-        )
-
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-
-    logger.info(f"📝 Logging initialized: {log_file}")
-    logger.info(f"Component: {component}, Rank: {rank}, Hostname: {hostname}")
+    prefix = "rank:server" if component == "server" else f"rank:{rank}"
+    fh.setLevel(level)
+    fh.setFormatter(logging.Formatter(f"%(asctime)s | %(levelname)s | {prefix} | %(message)s"))
+    logger.addHandler(fh)
+    logger.info("Logging initialised: %s (component=%s rank=%s hostname=%s)", log_file, component, rank, hostname)
 
 
-def log_step(
-    logger: logging.Logger, step: int, message: str, level: int = logging.INFO
-):
-    """
-    Log a message with step information for better Loki filtering.
-
-    Args:
-        logger: Logger instance
-        step: Training step number
-        message: Log message
-        level: Logging level
-    """
-    logger.log(level, f"step:{step} | {message}")
+def log_step(logger: logging.Logger, step: int, message: str, level: int = logging.INFO) -> None:
+    logger.log(level, "step:%d | %s", step, message)
 
 
-def log_metric(
-    logger: logging.Logger,
-    step: int,
-    metric_name: str,
-    value: float,
-    extra_info: Optional[str] = None,
-):
-    """
-    Log a metric in a structured way.
-
-    Args:
-        logger: Logger instance
-        step: Training step
-        metric_name: Name of the metric (e.g., "loss", "accuracy")
-        value: Metric value
-        extra_info: Optional additional context
-    """
+def log_metric(logger: logging.Logger, step: int, metric_name: str, value: float, extra_info: Optional[str] = None) -> None:
     msg = f"step:{step} | metric:{metric_name} | value:{value:.6f}"
     if extra_info:
         msg += f" | {extra_info}"
     logger.info(msg)
-
-
-# Example Grafana LogQL queries (add to docstring or README)
-EXAMPLE_QUERIES = """
-# Grafana Loki Query Examples for smolcluster
-
-## View all server logs
-{component="server"}
-
-## View specific worker
-{component="worker", rank="0"}
-
-## Find errors across all workers
-{component="worker"} |= "ERROR"
-
-## Filter by training step
-{component="worker"} | regexp "step:(?P<step>\\d+)" | step > 1000
-
-## View gradient updates
-{job="smolcluster-worker"} |= "gradient"
-
-## Find timeouts or connection issues
-{job=~"smolcluster.*"} |~ "timeout|connection|error"
-
-## Compare loss across workers
-{component="worker"} | regexp "metric:loss.*value:(?P<loss>[\\d.]+)"
-
-## View recent logs (last 5 minutes)
-{component="worker"}[5m]
-
-## Count errors per worker
-sum by (rank) (count_over_time({component="worker"} |= "ERROR" [1h]))
-"""

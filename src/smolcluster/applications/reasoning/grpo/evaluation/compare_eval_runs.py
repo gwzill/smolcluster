@@ -2,8 +2,15 @@
 
 import argparse
 import json
+import logging
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).parents[5]))
+from smolcluster.utils.logging_utils import setup_logging  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 from scipy import stats
@@ -139,6 +146,7 @@ def paired_test(baseline: List[float], candidate: List[float], alpha: float) -> 
 
 
 def main() -> None:
+    setup_logging()
     args = parse_args()
     baseline_dir = resolve_run_dir(args.baseline_run)
     candidate_dir = resolve_run_dir(args.candidate_run)

@@ -33,7 +33,14 @@ grad_checkpoint: true
 grad_chunk_size: 1      # Prompts per outer backward chunk (T=2, so 2 outer iterations)
 rollout_grad_chunk: 2   # Rollouts per inner backward chunk — each nn.value_and_grad sees chunk_T×rollout_grad_chunk sequences
 reward_workers: 8       # Number of threads for parallel reward computation (null = auto)
-prefetch_rollouts: true  # fetch next step's rollouts in background during compute (grad_accum_steps=1 only)
+
+# Quality metrics used in calculate_summary_quality (any combination, at least one)
+quality_metrics:
+  rouge: false
+  meteor: true
+  bleu: false
+
+
 
 # LoRA adapters — applied when model has uint32 (4-bit) weights, or force_lora=true.
 # For a bf16 0.5B model: force_lora=true cuts trainable params 494M→~2.8M,
@@ -53,6 +60,7 @@ data:
   test_split: "test"
 
 # Rollout generation
+prefetch_rollouts: true  # fetch next step's rollouts in background during compute (grad_accum_steps=1 only)
 max_input_tokens: 512
 max_output_tokens: 512 #for hard limit on summarization task
 num_rollouts: 4  # for each worker 
@@ -71,7 +79,7 @@ vllm_cluster:
 weight_sync:
   save_every_steps: 100              # save/overwrite latest checkpoint every N optimizer steps (0 = disabled)
   sync_steps: 5                    # sync/reload workers every N training steps (0 = disabled)
-  checkpoint_dir: "checkpoints/grpo-summarization-length-only"  # relative to project root
+  checkpoint_dir: "checkpoints/grpo-summarization-length-quality-meteor"  # relative to project root
 
   # remote_user and host_ip are read from model_config_inference.yaml cluster.*
   remote_model_dir: "~/grpo_model"  

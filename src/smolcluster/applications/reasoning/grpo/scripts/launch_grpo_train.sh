@@ -382,17 +382,6 @@ if [[ ! -f "$TRAIN_SCRIPT" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$VENV_ACTIVATE" ]]; then
-    echo "Error: .venv not found at $PROJECT_DIR/.venv"
-    echo "Run 'uv sync --extra mlx' inside $PROJECT_DIR to create it."
-    exit 1
-fi
-
-echo ""
-echo "Installing dependencies..."
-cd "$PROJECT_DIR"
-uv pip install -e .
-
 HF_ENV_SETUP=""
 if [[ -n "${HF_TOKEN:-}" ]]; then
     HF_ENV_SETUP="export HUGGING_FACE_HUB_TOKEN=\"${HF_TOKEN}\"; export HF_TOKEN=\"${HF_TOKEN}\"; "
@@ -401,7 +390,7 @@ elif [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
 fi
 HF_ENV_SETUP+="export HF_HUB_ENABLE_HF_TRANSFER=1; "
 
-TRAIN_CMD="source \"$VENV_ACTIVATE\" && ${HF_ENV_SETUP}python \"$TRAIN_SCRIPT\""
+TRAIN_CMD="cd \"$PROJECT_DIR\" && ${HF_ENV_SETUP}uv run --group mlx python \"$TRAIN_SCRIPT\""
 TMUX_CMD="bash -lc '$TRAIN_CMD; status=\$?; echo; echo Training exited with status \$status.; echo Session kept open for inspection.; exec bash -i'"
 
 echo ""

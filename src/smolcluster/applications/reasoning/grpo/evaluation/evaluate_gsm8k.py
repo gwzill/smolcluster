@@ -60,8 +60,9 @@ from smolcluster.applications.reasoning.grpo.utils.rollouts import (
 )
 from smolcluster.applications.reasoning.grpo.utils.training_utils import get_mlx_device
 from smolcluster.applications.reasoning.grpo.utils.worker_sync import sync_and_reload_workers
+from smolcluster.utils.logging_utils import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
+setup_logging()
 logger = logging.getLogger(__name__)
 _answers_log_lock = threading.Lock()
 

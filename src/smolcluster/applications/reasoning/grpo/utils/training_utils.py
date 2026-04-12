@@ -14,6 +14,7 @@ import numpy as np
 from mlx.nn.utils import checkpoint as mlx_grad_checkpoint
 from mlx.utils import tree_flatten, tree_unflatten
 from mlx_lm import load as mlx_load
+from mlx_lm.utils import save_config as mlx_save_config
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,7 @@ def load_model(
     dtype: type,
     config: Dict[str, Any],
     model_config: Dict[str, Any],
-) -> Tuple[Any, Optional[Any], Any]:
+) -> Tuple[Any, Optional[Any], Any, Dict[str, Any]]:
     """Load the policy model (and optionally the reference model) from HF.
 
     Args:
@@ -356,7 +357,9 @@ def load_model(
         model_config: Model config dict (contains ``dp.hf_model_name``).
 
     Returns:
-        (model, ref_model, tokenizer) — ref_model is None when use_kl=false.
+        (model, ref_model, tokenizer, model_cfg) — ref_model is None when
+        use_kl=false; model_cfg is the raw HF config dict (includes quantization
+        metadata if the base model is quantized).
     """
     model_name = model_config["dp"]["hf_model_name"]
     tokenizer_config = {
@@ -367,12 +370,11 @@ def load_model(
     device_stream = mx.default_stream(device)
     logger.info("Loading MLX model: %s (device=%s)", model_name, config.get("device", "cpu"))
 
-    model, tokenizer = mlx_load(model_name, tokenizer_config=tokenizer_config)
+    model, tokenizer, model_cfg = mlx_load(model_name, tokenizer_config=tokenizer_config, return_config=True)
     with mx.stream(device_stream):
         mx.eval(model.parameters())
     _log_mem("load_model: after policy model load")
 
-  
     ref_model: Optional[Any] = None
     if config.get("use_kl", True):
         logger.info("Loading reference model (use_kl=true) ...")
@@ -384,7 +386,7 @@ def load_model(
     else:
         logger.info("Skipping reference model load (use_kl=false)")
 
-    return model, ref_model, tokenizer
+    return model, ref_model, tokenizer, model_cfg
 
 
 # ---------------------------------------------------------------------------

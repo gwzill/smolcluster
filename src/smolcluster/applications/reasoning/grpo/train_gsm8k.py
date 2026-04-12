@@ -49,6 +49,7 @@ from smolcluster.applications.reasoning.grpo.utils.worker_sync import (
     save_policy_weights,
     sync_and_reload_workers,
 )
+from smolcluster.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -696,7 +697,7 @@ def train(
                 logger.info("[checkpoint] Step %d — saving policy weights ...", global_step)
                 try:
                     # Periodic saves overwrite a stable "latest" checkpoint.
-                    weights_dir = save_policy_weights(model, checkpoint_dir, "latest")
+                    weights_dir = save_policy_weights(model, checkpoint_dir, "latest", tokenizer=tokenizer, model_cfg=model_cfg)
 
                     # Periodically reload vLLM workers so rollouts always come
                     # from the most recent policy.
@@ -778,7 +779,7 @@ def train(
 
     # Save final checkpoint after all epochs complete
     logger.info("[checkpoint] Training complete — saving final weights (step_%d) ...", global_step)
-    save_policy_weights(model, checkpoint_dir, global_step)
+    save_policy_weights(model, checkpoint_dir, global_step, tokenizer=tokenizer, model_cfg=model_cfg)
     logger.info("[checkpoint] Final checkpoint saved at step_%d.", global_step)
 
 
@@ -788,8 +789,7 @@ def main() -> None:
         _log.write_text("", encoding="utf-8")
     
     
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logging.getLogger().setLevel(logging.INFO)
+    setup_logging(force=True)
 
     if mx.metal.is_available():
         mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
@@ -806,7 +806,7 @@ def main() -> None:
     dtype = get_dtype_from_config(grpo_config)
     logger.info("Using dtype: %s", dtype)
 
-    model, ref_model, tokenizer = load_model(dtype, grpo_config, model_config)
+    model, ref_model, tokenizer, model_cfg = load_model(dtype, grpo_config, model_config)
     train_examples, val_examples = build_train_val_examples(
         grpo_config["data"], tokenizer=tokenizer, seed=seed
     )
@@ -814,7 +814,7 @@ def main() -> None:
     # Save step_0 checkpoint — initial (pre-training) weights for baseline comparison
     _ckpt_dir = str(grpo_config.get("weight_sync", {}).get("checkpoint_dir", "checkpoints/grpo"))
     logger.info("[checkpoint] Saving initial weights as step_0 ...")
-    save_policy_weights(model, _ckpt_dir, 0)
+    save_policy_weights(model, _ckpt_dir, 0, tokenizer=tokenizer, model_cfg=model_cfg)
     logger.info("[checkpoint] step_0 checkpoint saved.")
     _lora_active = apply_lora_if_quantized(model, grpo_config)
     optimizer_name = grpo_config.get("optimizer", "adam").lower()
