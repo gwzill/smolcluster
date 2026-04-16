@@ -38,7 +38,7 @@ reward_workers: 8       # Number of threads for parallel reward computation (nul
 quality_metrics:
   rouge: true
   meteor: false
-  bleu: true
+  bleu: false
 
 
 
@@ -79,7 +79,7 @@ vllm_cluster:
 weight_sync:
   save_every_steps: 100              # save/overwrite latest checkpoint every N optimizer steps (0 = disabled)
   sync_steps: 5                    # sync/reload workers every N training steps (0 = disabled)
-  checkpoint_dir: "checkpoints/grpo-summarization-length-quality-bleu-rouge"  # relative to project root
+  checkpoint_dir: "checkpoints/grpo-summarization-length-quality-rouge"  # relative to project root
 
   # remote_user and host_ip are read from model_config_inference.yaml cluster.*
   remote_model_dir: "~/grpo_model"  

@@ -66,16 +66,64 @@ $$
 
 ## Evaluation
 
-GRPO checkpoints in this directory are evaluated with task-specific scripts under `evaluation/`.
+GRPO checkpoints in this directory are evaluated with task-specific scripts under `evaluation/`. Each task uses a different dataset and evaluation approach:
 
-Datasets used in this setup:
+- **GSM8K**: Math reasoning evaluation using sampled accuracy-style metrics
+- **Summarization**: Text summarization on the mlabonne/smoltldr dataset using LLM judge
 
-- GSM8K for math reasoning.
-- `mlabonne/smoltldr` (`default` subset, `train` / `validation` splits) for summarization.
+---
 
-- `evaluate_gsm8k.py`: computes sampled GSM8K accuracy-style metrics and supports checkpoint comparison.
-- `evaluate_summarization.py`: generates summaries on the validation split, then scores them with four LLM-judge metrics: Faithfulness, Coverage, Conciseness, and Clarity.
-- `compare_eval_runs.py`: compares two saved summarization eval runs with paired significance tests on per-example metric scores and composite score.
+### GSM8K Evaluation
+
+**Dataset:** GSM8K for math reasoning
+
+**Script:** `evaluate_gsm8k.py`
+
+Computes sampled GSM8K accuracy-style metrics and supports checkpoint comparison.
+
+```bash
+cd src/smolcluster/applications/reasoning/grpo/evaluation
+uv run evaluate_gsm8k.py --checkpoint-dir ../../checkpoints/grpo-gsm8k/latest
+```
+
+---
+
+### Summarization Evaluation
+
+**Dataset:** `mlabonne/smoltldr` (default subset, validation split)
+
+#### Generate Summaries and Score with G-Eval Metrics
+
+**Script:** `evaluate_summarization.py`
+
+Generates summaries on the validation split, then scores each with four LLM-judge metrics:
+- Faithfulness
+- Coverage
+- Conciseness
+- Clarity
+
+```bash
+cd src/smolcluster/applications/reasoning/grpo/evaluation
+uv run evaluate_summarization.py --checkpoint-dir ../../checkpoints/grpo-summarization-length-quality/latest
+```
+
+#### Compare Two Summarization Evaluation Runs
+
+**Script:** `compare_eval_runs.py`
+
+Compares two saved summarization eval runs with paired significance tests on per-example metric scores and composite score.
+
+```bash
+cd src/smolcluster/applications/reasoning/grpo/evaluation
+uv run python compare_eval_runs.py \
+  --baseline-run grpo-summarization-length-only \
+  --candidate-run grpo-summarization-length-quality \
+  --alpha 0.05
+```
+
+Run names correspond to directories in `eval-rollouts/`. Output is saved to `eval-rollouts/<candidate>/comparison-vs-<baseline>.json`.
+
+---
 
 ### Hosted Eval Artifacts
 

@@ -1254,13 +1254,13 @@ function appendLog({ hostname, line }) {
 
   // Optional structured training transport marker.
   // Any algorithm/file can emit:
-  //   [SMOL_IO] {"phase":"request"}
-  //   [SMOL_IO] {"phase":"response"}
+  //   [TRANSPORT_EVENT] {"phase":"request"}
+  //   [TRANSPORT_EVENT] {"phase":"response"}
   // and the topology will animate coordinator<->workers with measured RTT.
-  const smolIoM = line.match(/\[SMOL_IO\]\s*(\{.+\})/);
-  if (smolIoM) {
+  const transportEventMatch = line.match(/\[TRANSPORT_EVENT\]\s*(\{.+\})/);
+  if (transportEventMatch) {
     try {
-      const io = JSON.parse(smolIoM[1]);
+      const io = JSON.parse(transportEventMatch[1]);
       const phase = String(io.phase || io.event || io.type || '').toLowerCase();
       if (phase === 'request' || phase === 'req' || phase === 'outbound' || phase === 'send') {
         _markTrainIoRequestEvent();

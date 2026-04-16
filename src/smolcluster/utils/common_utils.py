@@ -6,6 +6,7 @@ import logging
 from copy import deepcopy
 from typing import Any, Optional
 import torch
+from smolcluster.utils.logging_utils import emit_transport_event
         
 # Module logger
 logger = logging.getLogger(__name__)
@@ -261,6 +262,9 @@ def send_message(
     _network_metrics.record_buffer_size(len(data))
     sock.sendall(struct.pack(">I", len(data)) + data)
 
+    cmd = message[0] if isinstance(message, (tuple, list)) and message else ""
+    emit_transport_event("request", transport="socket", command=cmd)
+
     # Record metrics
     duration = time.time() - start_time
     _network_metrics.record_send(len(data), duration)
@@ -312,6 +316,9 @@ def receive_message(
         remaining -= len(chunk)
 
     result = pickle.loads(data)
+
+    cmd = result[0] if isinstance(result, (tuple, list)) and result else ""
+    emit_transport_event("response", transport="socket", command=cmd)
 
     # Record metrics
     duration = time.time() - start_time

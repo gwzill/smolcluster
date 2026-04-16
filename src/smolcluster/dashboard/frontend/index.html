@@ -1973,16 +1973,8 @@ function renderHeader() {
   setText('lbl-clus', `${Object.keys(clusterDedup()).length} in cluster`);
   const redis = state.redis || {};
   const redisStatus = String(redis.status || 'unknown').toLowerCase();
-  const redisOps = redis.ops || {};
-  const totalOps = Number(redisOps.selected_restore || 0)
-    + Number(redisOps.selected_write || 0)
-    + Number(redisOps.selected_delete || 0)
-    + Number(redisOps.ui_get || 0)
-    + Number(redisOps.ui_set || 0)
-    + Number(redisOps.events_cache_writes || 0)
-    + Number(redisOps.logs_stream_writes || 0);
   const redisLabel = redisStatus === 'connected'
-    ? `redis: on (${totalOps} ops)`
+    ? `redis: on`
     : `redis: ${redisStatus}`;
   setText('lbl-redis', redisLabel);
   const redisPip = $('pip-redis');
@@ -2600,9 +2592,7 @@ function syncLogFilter() {
   refreshLogHostLabels();
 }
 
-function appendLog({ hostname, line }) {
-  // Persist log entry to Redis-backed buffer
-  persistLog({ hostname, line });
+function appendLog({ hostname, line, ts }) {
 
   // Fast-path: structured metrics JSON emitted by the training server.
   // Format: "[SMOL_METRICS] {\"step\":50,\"grad_norm\":1.23,...}"
@@ -2618,20 +2608,25 @@ function appendLog({ hostname, line }) {
       trainingFallbackMetrics.algorithm ||= _activeAlgo || $('algo-sel').value;
       renderMetrics();
     } catch(e) {}
-    // Fall through so the line is also visible in the log terminal.
+    // Don't display structured metrics in the log terminal.
+    return;
   }
 
   const lowerLine = String(line || '').toLowerCase();
 
   // Optional structured training transport marker.
   // Any algorithm/file can emit:
-  //   [SMOL_IO] {"phase":"request"}
-  //   [SMOL_IO] {"phase":"response"}
+  //   [TRANSPORT_EVENT] {"phase":"request"}
+  //   [TRANSPORT_EVENT] {"phase":"response"}
   // and the topology will animate coordinator<->workers with measured RTT.
-  const smolIoM = line.match(/\[SMOL_IO\]\s*(\{.+\})/);
-  if (smolIoM) {
+  const transportEventMatch = line.match(/\[TRANSPORT_EVENT\]\s*(\{.+\})/);
+  if (transportEventMatch) {
+    // Ignore replayed/history transport markers to avoid packet storms on refresh.
+    const eventAgeMs = (typeof ts === 'number' && ts > 0) ? (Date.now() - ts * 1000) : null;
+    const isReplayedOrStale = _replayingLogs || (eventAgeMs != null && eventAgeMs > 4000);
+    if (isReplayedOrStale) return;
     try {
-      const io = JSON.parse(smolIoM[1]);
+      const io = JSON.parse(transportEventMatch[1]);
       const phase = String(io.phase || io.event || io.type || '').toLowerCase();
       if (phase === 'request' || phase === 'req' || phase === 'outbound' || phase === 'send') {
         _markTrainIoRequestEvent();
@@ -2639,28 +2634,13 @@ function appendLog({ hostname, line }) {
         _markTrainIoResponseEvent();
       }
     } catch (e) {}
+    // Structured transport events are internal signals for topology animation.
+    // Keep them out of the visible log terminal.
+    return;
   }
 
-  // Training transport events (coordinator -> workers request, workers -> coordinator response).
-  // This is algorithm-agnostic and driven by live log lines when available.
-  const looksLikeRequest =
-    (/\brequest\b/i.test(line) && /\bn=\d+/i.test(line) && /vllm|worker/i.test(line))
-    || /request n=\d+ comple/i.test(lowerLine)
-    || /\b(dispatch|sending|send|submit|submitted)\b.*\b(prompt|rollout|batch|request|rpc)\b/.test(lowerLine)
-    || /\b(prompt|rollout|batch|request|rpc)\b.*\b(to|->)\b.*\b(worker|server|rank|node)\b/.test(lowerLine);
-  const looksLikeResponse =
-    /got\s+\d+\/\d+\s+non-empty\s+completion/i.test(lowerLine)
-    || /all workers done\.\s*\d+\s+non-empty/i.test(lowerLine)
-    || /received\s+\d+\s+usable/i.test(lowerLine)
-    || /\b(received|recv|returned|response|reply)\b.*\b(result|completion|rollout|batch|token|output)\b/.test(lowerLine)
-    || /\b(result|completion|rollout|batch|output)\b.*\b(from|<-|back)\b.*\b(worker|server|rank|node)\b/.test(lowerLine);
-
-  if (looksLikeRequest) {
-    _markTrainIoRequestEvent();
-  }
-  if (looksLikeResponse) {
-    _markTrainIoResponseEvent();
-  }
+  // Persist only user-visible logs (exclude internal marker traffic).
+  persistLog({ hostname, line, ts });
 
   const isTrainingLog = /step|loss|tok\/s|gradient norm|grad_norm|\blr\b|it\/s|eta/.test(lowerLine);
   if (isTrainingLog) {
@@ -2818,6 +2798,10 @@ function applyLogFilter() {
 function clearLogs() {
   $('logbox').innerHTML = '';
   logBuffer = [];
+  _trainIoPendingReq = 0;
+  _trainIoPendingResp = 0;
+  _trainIoReqTs = 0;
+  _trainIoRespTs = 0;
   knownLogHosts.clear();
   const sel = $('log-filter');
   while (sel.children.length > 1) sel.removeChild(sel.lastChild);
@@ -3118,7 +3102,7 @@ function _markTrainIoRequestEvent() {
   }
   _lastTrainIoReqPerf = nowPerf;
   _trainIoReqTs = Date.now();
-  _trainIoPendingReq += 1;
+  _trainIoPendingReq = Math.min(2, _trainIoPendingReq + 1);
 }
 
 function _markTrainIoResponseEvent() {
@@ -3131,7 +3115,7 @@ function _markTrainIoResponseEvent() {
   }
   _lastTrainIoRespPerf = nowPerf;
   _trainIoRespTs = Date.now();
-  _trainIoPendingResp += 1;
+  _trainIoPendingResp = Math.min(2, _trainIoPendingResp + 1);
 }
 
 // ── Scene setup ───────────────────────────────────────────────────────────────

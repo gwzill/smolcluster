@@ -1,5 +1,6 @@
 """Centralized logging configuration for smolcluster."""
 
+import json
 import logging
 import re
 import sys
@@ -164,3 +165,20 @@ def log_metric(logger: logging.Logger, step: int, metric_name: str, value: float
     if extra_info:
         msg += f" | {extra_info}"
     logger.info(msg)
+
+
+def emit_transport_event(phase: str, **fields) -> None:
+    """Emit machine-readable transport events for dashboard particle animation.
+
+    The dashboard listens for lines in the form:
+            [TRANSPORT_EVENT] {"phase":"request"|"response", ...}
+    """
+    payload = {"phase": str(phase or "").strip().lower()}
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if isinstance(v, (str, int, float, bool)):
+            payload[k] = v
+        else:
+            payload[k] = str(v)
+    print(f"[TRANSPORT_EVENT] {json.dumps(payload)}", flush=True)

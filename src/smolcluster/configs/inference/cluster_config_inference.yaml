@@ -49,15 +49,15 @@ metrics_log_interval: 50  # Log network metrics every N steps
 num_workers: 2
 total_num_nodes: 3
 
-server: mini2    # Server hostname (rank 0 for SyncPS inference)
+server: mini1    # Server hostname (rank 0 for SyncPS inference)
 workers:
   regular:
-  - hostname: mini3
+  - hostname: mini2
     rank: 1
-    ip: 10.10.0.3
-  - hostname: mini1
+    ip: 10.10.0.2
+  - hostname: mini3
     rank: 2
-    ip: 172.18.2.15
+    ip: 10.10.0.3
   tablets: []
 
 num_nodes: 3
