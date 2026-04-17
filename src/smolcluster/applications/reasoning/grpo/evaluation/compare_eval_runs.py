@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-run", required=True, help="Baseline run directory name under eval-rollouts.")
     parser.add_argument("--candidate-run", required=True, help="Candidate run directory name under eval-rollouts.")
     parser.add_argument("--alpha", type=float, default=0.05, help="Significance level.")
+    parser.add_argument("--two-sided", action="store_true", help="Judge significance using the two-sided p-value instead of the one-sided (candidate > baseline) p-value.")
     return parser.parse_args()
 
 
@@ -170,13 +171,14 @@ def main() -> None:
             candidate_values.append(float(candidate_value))
         results[metric_name] = paired_test(baseline_values, candidate_values, args.alpha)
 
+    two_sided = args.two_sided
     report = {
         "baseline_run": baseline_dir.name,
         "candidate_run": candidate_dir.name,
         "alpha": args.alpha,
         "test_name": "paired_t_test",
         "difference_direction": "candidate_minus_baseline",
-        "alternative_greater": "candidate mean > baseline mean",
+        "alternative": "two-sided" if two_sided else "greater (candidate > baseline)",
         "num_shared_examples": len(shared_indices),
         "results": results,
     }
@@ -186,13 +188,21 @@ def main() -> None:
 
     print(f"Baseline: {baseline_dir.name}")
     print(f"Candidate: {candidate_dir.name}")
+    print(f"Test: {'two-sided' if two_sided else 'one-sided (candidate > baseline)'}  alpha={args.alpha}")
     print(f"Saved: {out_path}")
     for metric_name, payload in results.items():
-        print(
-            f"{metric_name}: baseline={payload['baseline_mean']:.6f} candidate={payload['candidate_mean']:.6f} "
-            f"delta={payload['mean_delta']:.6f} p_greater={payload['p_value_greater']:.6g} "
-            f"p_two_sided={payload['p_value_two_sided']:.6g} significant_greater={payload['significant_greater']}"
-        )
+        if two_sided:
+            print(
+                f"{metric_name}: baseline={payload['baseline_mean']:.6f} candidate={payload['candidate_mean']:.6f} "
+                f"delta={payload['mean_delta']:.6f} p_two_sided={payload['p_value_two_sided']:.6g} "
+                f"significant={payload['significant_two_sided']}"
+            )
+        else:
+            print(
+                f"{metric_name}: baseline={payload['baseline_mean']:.6f} candidate={payload['candidate_mean']:.6f} "
+                f"delta={payload['mean_delta']:.6f} p_greater={payload['p_value_greater']:.6g} "
+                f"p_two_sided={payload['p_value_two_sided']:.6g} significant_greater={payload['significant_greater']}"
+            )
 
 
 if __name__ == "__main__":
