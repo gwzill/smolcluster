@@ -1,8 +1,8 @@
-# Reward Signal Ablation for GRPO Summarization on Apple Silicon
+# Length-Constrained Summarization with GRPO: Ablating Reward Signals on [Reddit TL;DR](https://huggingface.co/datasets/mlabonne/smoltldr)
 
-**Authors:** Yuvraj Singh · **Date:** May 2026 · **Reading time:** ~14 min
+**Authors:** Yuvraj Singh · **Date:** May 2026 · **Reading time:** ~20 min
 
----
+> **Abstract.** We ablate reward signals for GRPO summarization on [Reddit TL;DR](https://huggingface.co/datasets/mlabonne/smoltldr), targeting a **64-token** output budget across **Qwen2.5-0.5B** and **LFM-2.5-350M**. **Twelve reward configurations** *(six per strategy)* combine a length penalty with [ROUGE-L](#algorithm-1-1), [METEOR](#algorithm-1-1), [BLEU](#algorithm-1-1), and their pairings under two strategies: **length-penalty fine-tuned** *(starting from a length-pretrained 64-token checkpoint)* and **length-penalty included** *(including the length penalty directly in the reward function)*. Starting from a **length-penalty fine-tuned** checkpoint consistently outperforms the **length-penalty included** variant, with best G-Eval averages of ***2.904*** *(LFM)* and ***2.817*** *(Qwen)*. All experiments run on an **Apple Silicon 3x Mac mini M4 (2024, 16 GB each) cluster**.
 
 ## Table of Contents
 
@@ -16,22 +16,24 @@
 8. [Limitations](#limitations)
 9. [Future Work](#future-work)
 
----
+
 
 ## Introduction
 
-<!-- USER WRITES THIS SECTION -->
+Length control is a core challenge in text summarization: the right summary length depends on the source document, the application, and user preference - from a single sentence to several paragraphs. This matters most in constrained settings like fixed-width displays or strict token budgets, where quality and length accuracy must be met simultaneously.
 
----
+Early work introduced length as an explicit parameter or embedding, but these approaches underperformed on quality metrics [[Kikuchi et al., 2016]](https://aclanthology.org/D16-1140/); [[Liu et al., 2018]](https://aclanthology.org/D18-1444/). Later methods discretize the target length into bins and condition generation on a bucket prefix or constraint signal, improving quality but sacrificing precise token-level control [[Fan et al., 2018]](https://aclanthology.org/W18-2706/); [[He et al., 2020]](https://arxiv.org/abs/2001.07331); [[Takase & Okazaki, 2019]](https://aclanthology.org/N19-1401/). A third line directly manipulates EOS token probabilities to steer length, but risks fluency degradation and coverage gaps [[Chan et al., 2021]](https://arxiv.org/abs/2108.02859); [[Liu et al., 2022]](https://arxiv.org/abs/2209.14672).
+
+This work takes a different path: we express the length constraint as a **scalar reward signal** and train with **Group Relative Policy Optimization** (GRPO) [[Shao et al., 2024]](https://arxiv.org/abs/2402.03300), ablating it against **six lexical quality rewards** ([ROUGE-L](#algorithm-1-1), [METEOR](#algorithm-1-1), [BLEU](#algorithm-1-1) and their combinations) across two small open-weight models on [Reddit TL;DR](https://huggingface.co/datasets/mlabonne/smoltldr) summarization dataset, running end-to-end with a *single node training multi node* inference setup on Apple Silicon, using [smolcluster](https://github.com/mlabonne/smolcluster) to manage distributed rollout generation on vLLM workers.
 
 ## Task & Dataset
 
 ### The Summarization Task
 
-The goal is compact, faithful summarization of Reddit posts - specifically, producing a summary of **exactly 64 tokens** or or close to 50 words, that captures the key points without introducing content not present in the source. This is a harder constraint than typical abstractive summarization (generating new sentences that paraphrase the source, rather than copying spans verbatim): the model must simultaneously compress aggressively, preserve meaning, and respect a hard length budget.
+The goal is compact, faithful summarization of Reddit posts - specifically, producing a summary of **exactly 64 tokens** or or close to 50 words, that captures the key points without introducing content not present in the source. This is a harder constraint than typical *abstractive summarization*: the model must simultaneously compress aggressively, preserve meaning, and respect a hard length budget.
 
 
-### Dataset: smoltldr
+### Dataset: Reddit TL;DR dataset -  smoltldr
 
 All experiments use the [`mlabonne/smoltldr`](https://huggingface.co/datasets/mlabonne/smoltldr) dataset, a curated collection of Reddit posts paired with human-written TL;DR summaries.
 
@@ -43,7 +45,7 @@ All experiments use the [`mlabonne/smoltldr`](https://huggingface.co/datasets/ml
 | Validation | **200** |
 | Test | **200** |
 
-All reported scores are computed on the **200-example test split** (Table 1). Training uses the full train split for 1 epoch.
+All reported scores are computed on the **200-example test split**. Training uses the full train split for 1 epoch.
 
 *Table 1b: Reference summary token distribution - `completion` column, model-native tokenizer, test split (n = 200).*
 
@@ -197,9 +199,6 @@ All three are computed against the human-written reference summary in the datase
 > $$\text{BLEU} = \text{BP} \cdot \exp\!\left(\sum_{n=1}^{N} w_n \log p_n\right)$$
 > where $\text{BP}$ is a brevity penalty that discounts outputs shorter than the reference, and $p_n$ is the modified n-gram precision for order $n$.
 
-Below, we have the charts for reward signal for each of the 6 combinations of quality metrics under each training strategy, for both models.
-
-TODO: add reward signal charts here
 
 ### Training Strategies
 
@@ -260,7 +259,7 @@ Both models are fine-tuned from the instruction-tuned variants (not base models)
 
 All training runs on **Apple Silicon** using [MLX](https://github.com/ml-explore/mlx), Apple's array framework for unified-memory hardware. Rollout generation is offloaded to distributed **vLLM** workers via the [`smolcluster`](https://github.com/YuvrajSingh9886/smolcluster) framework, which manages multi-node rollout distribution and weight synchronization.
 
-#TODO ADD IMAGE HERE
+![Asynchronous master-worker topology for rollout generation and training coordination](assets/wandb-charts/async_master_worker_topology.png)
 
 ### GRPO Hyperparameters
 
@@ -472,6 +471,7 @@ Without the length penalty during fine-tuning, output **lengths diverge sharply*
 
 The reason lies in the formulation of the [`ROUGE-L`](#algorithm-1-1), [`METEOR`](#algorithm-1-1), and [`BLEU`](#algorithm-1-1) rewards:
 
+- One notable constrast with the ```length penalty fine-tuned``` variant is the ```Average``` scores are generally higher for Qwen than LFM across the board,indicating the effectivensss of the use of starting off with a fine tuned checkpoint and further tuning it with quality rewards.
 - There is no active reward for length in this strategy, so the model is free to optimize for quality without any constraint on output length.
 - `BLEU`'s brevity penalty penalizes outputs shorter than the reference, encouraging longer outputs. Configurations containing `BLEU` (`quality-bleu`, `quality-meteor-bleu`) produce much longer outputs *(P50 of ~112-130 tokens)* across both models, except `quality-bleu-rouge` *(P50 of 29-32 tokens)* where ROUGE-L's precision term pulls length back down.
 - [`ROUGE-L`](#algorithm-1-1) and [`METEOR`](#algorithm-1-1) reward recall, which does not directly incentivize longer outputs on their own.
@@ -495,15 +495,40 @@ With length and quality rewards active simultaneously, all configurations stay t
 
 ### Training Dynamics
 
-The length-only training curve illustrates a dynamic common to all runs:
+---
 
-- **`reward_std`** collapses from ~1.0 → ~0.25 within the first ~150 steps and flatlines - rollouts become homogeneous, advantages approach zero, and the effective gradient signal diminishes sharply.
-- **`reward_mean`** improves from ~−1.0 → ~−0.2, confirming that length control is genuinely learned before the signal disappears.
-- **`kl/clip_frac`** is zero throughout 1,000 steps - the PPO clip never fires.
-- **`kl/ratio_mean`** stays within [0.985, 1.015] - per-token probability shifts of ≈1% per step.
-- **Grad norm** reaches 11.9 (pre-clip), scaled down ~12× by `max_grad_norm: 1.0` before application.
+**LFM-2.5-350M**
+
+![LFM-2.5-350M — train/step, train/loss, train/grad_norm, train/epoch, amp_skipped_step, amp_scale across reward configurations](assets/wandb-charts/lfm_length_penalty_included_training.png)
+<p><strong>Figure 3a</strong> — LFM-2.5-350M: <code>train/step</code>, <code>train/loss</code>, <code>grad_norm</code>, <code>epoch</code>, <code>amp_skipped_step</code>, <code>amp_scale</code> across reward configurations, length-penalty-included strategy (W&amp;B).</p>
+
+![LFM-2.5-350M — advantage_std and advantage_mean across reward configurations](assets/wandb-charts/lfm_length_penalty_included_advantages.png)
+<p><strong>Figure 3b</strong> — LFM-2.5-350M: <code>advantage_std</code> and <code>advantage_mean</code> across reward configurations, length-penalty-included strategy (W&amp;B).</p>
+
+![LFM-2.5-350M — num_rollouts, generation_token_len_min/mean/max across reward configurations](assets/wandb-charts/lfm_length_penalty_included_rollouts.png)
+<p><strong>Figure 3c</strong> — LFM-2.5-350M: <code>num_rollouts</code>, <code>generation_token_len_{min,mean,max}</code> across reward configurations, length-penalty-included strategy (W&amp;B).</p>
 
 ---
+
+**Qwen2.5-0.5B-Instruct**
+
+![Qwen2.5-0.5B — train/step, train/loss, train/grad_norm, train/epoch, amp_skipped_step, amp_scale across reward configurations](assets/wandb-charts/qwen_length_penalty_included_training.png)
+<p><strong>Figure 4a</strong> — Qwen2.5-0.5B: <code>train/step</code>, <code>train/loss</code>, <code>grad_norm</code>, <code>epoch</code>, <code>amp_skipped_step</code>, <code>amp_scale</code> across reward configurations, length-penalty-included strategy (W&amp;B).</p>
+
+![Qwen2.5-0.5B — advantage_std and advantage_mean across reward configurations](assets/wandb-charts/qwen_length_penalty_included_advantages.png)
+<p><strong>Figure 4b</strong> — Qwen2.5-0.5B: <code>advantage_std</code> and <code>advantage_mean</code> across reward configurations, length-penalty-included strategy (W&amp;B).</p>
+
+![Qwen2.5-0.5B — num_rollouts, generation_token_len_min/mean/max across reward configurations](assets/wandb-charts/qwen_length_penalty_rollouts.png)
+<p><strong>Figure 4c</strong> — Qwen2.5-0.5B: <code>num_rollouts</code>, <code>generation_token_len_{min,mean,max}</code> across reward configurations, length-penalty-included strategy (W&amp;B).</p>
+
+The length-only training curve illustrates a dynamic common to all runs:
+
+- **`reward_std`** for both the models, converges to *~0.25* on a smoothed curve for both the models and flatlines - rollouts become homogeneous, advantages approach zero, and the effective gradient signal diminishes sharply.
+- **`reward_mean`** improves from *~−1.0 → ~−0.2*, confirming that length control is genuinely learned before the signal disappears.
+- **`kl/clip_frac`** is zero throughout 1,000 steps - the PPO clip never fires.
+- **`kl/ratio_mean`** stays within *[0.985, 1.015]* - per-token probability shifts of ≈1% per step.
+- **Grad norm** reaches *11.9* (pre-clip), scaled down *~12×* by `max_grad_norm: 1.0` before application, meaning the learning takes place.
+
 
 ## Analysis & Discussion
 
@@ -534,33 +559,32 @@ The gap is larger for LFM (−0.203) than for Qwen (−0.048). In both cases, th
 
 ### 3. Reward Hacking
 
+
+![kl_ratio_and_clip_ratio](assets/wandb-charts/kl_clip_training_curves.png)
+
+![KL divergence and clip fraction — Qwen2.5-0.5B and LFM-2.5-350M across reward configurations](assets/wandb-charts/kl_clip_curves_qwen_lfm.png)
+<a id="figure-2"></a><p><strong>Figure 2</strong> — <code>kl_divergence</code> and <code>clip_frac</code> across Qwen2.5-0.5B-bf16 (top) and LFM-2.5-350M (bottom) across all reward configurations (W&amp;B). Both remain at zero throughout training.</p>
+
 - Training the model with just a length constraint, it was expected for it to regress to converge to the specified length (64 tokens) and optimize for that alone, meaning it was not necessary for outputs to be even coherent, but with average scores of *2.233* (LFM) and *2.416* (Qwen) at step 1,000, and `Coverage` scores of *0.378* (LFM) and *0.407* (Qwen), the models are clearly producing fluent summaries that cover some ground, not just random tokens of the right length.
 
 - *Why was it? What was stopping them from not doing so?*
-Analysis of [plots](https://wandb.ai/rentio/grpo-summarization?nw=nwuserrajceo2031) shows that, neither `kl_divergence` nor `clip_frac` ever rise above zero, meaning the PPO clip never fires and the KL penalty is never active, but the `grad_norm` was strongly clipped (reaching 11.9 pre-clip), so the model was taking large steps in parameter space that were then scaled down by the `max_grad_norm: 1.0` constraint. This suggests the model learning but not enough of a signal to drive the model to collapse to a single token or a small set of tokens, along with the presence of a very strong prior - an instruct-tuned model with a strong bias towards producing fluent summaries - that prevents it from diverging into incoherence.
+Analysis of [Figure 2](#figure-2) shows that, neither `kl_divergence` nor `clip_frac` ever rise above zero, meaning the PPO clip never fires and the KL penalty is never active, but the `grad_norm` was strongly clipped (reaching 11.9 pre-clip), so the model was taking large steps in parameter space that were then scaled down by the `max_grad_norm: 1.0` constraint. This suggests the model learning but not enough of a signal to drive the model to collapse to a single token or a small set of tokens, along with the presence of a very strong prior - an instruct-tuned model with a strong bias towards producing fluent summaries - that prevents it from diverging into incoherence.
 
-![Figure 2: Training curves for `kl_divergence` and `clip_frac` across all models and reward configurations. Neither metric rises above zero throughout training - the PPO clip never fires and the KL penalty remains inactive - confirming the policy updates are driven entirely by gradient norm clipping rather than trust-region or KL constraints.](assets/wandb/kl_clip_training_curves.png)
 
-*Figure 2: `kl_divergence` and `clip_frac` across all models and reward configurations (W&B). Both remain at zero throughout training.*
 
 - Another case is with when only the quality metrics are active on the length penalty fine-tuned variant that the model pushes to optimize hard for to an extent that the `Coverage` metric collapses to very low values (e.g., *0.262* for `quality-rouge` in LFM), which is a form of reward hacking where the model finds a local optimum that maximizes the reward signal (e.g., by producing longer outputs that get higher [`BLEU`](#algorithm-1-1) n-gram precision) at the cost of actually covering the reference content.
 
 
 ### 4. Reward Signal Interactions
 
+- The presence quality metric - ```METEOR``` - seems to provide a stronger, more consistent signal across both models and strategies than the other two quality metrics.
+- As per the analysis of the **Training Dynamics** section, the ```reward_std``` for the both the models converges to *~0.25* and flatlines, however, the variants with ```length penalty included``` started with near *2.1* (highest) reward std, while the variants with ```length penalty fine-tuned``` started with near *0.5* (lowest) reward std, which suggests that the joint training strategy allows for more exploration and diversity in the rollouts during training, while the fine-tuning strategy leads to more homogeneous rollouts and a quicker collapse of the reward signal.
 
+- Out of the three quality metrics, [`BLEU`](https://wandb.ai/rentio/grpo-summarization?nw=nwuserrajceo2031&panelDisplayName=rewards%2Fquality_bleu_mean&panelSectionName=rewards) appears to provide the weakest signal under both models, while [`METEOR`](https://wandb.ai/rentio/grpo-summarization?nw=nwuserrajceo2031&panelDisplayName=rewards%2Fquality_meteor_mean&panelSectionName=rewards) providing the largest *consistent* boost to the overall reward under both the configurations, while [`ROUGE-L`](https://wandb.ai/rentio/grpo-summarization?nw=nwuserrajceo2031&panelDisplayName=rewards%2Fquality_bleu_mean&panelSectionName=rewards) contribute the second highest boost to the reward.
 
----
+## Limitations and Future Work
 
-## Limitations
-
-<!-- USER WRITES THIS SECTION -->
-
----
-
-## Future Work
-
-- **Longer training past reward_std collapse.** The current runs plateau at ~150 steps due to group homogeneity. Curriculum strategies that maintain rollout diversity - e.g., temperature annealing, mixing prompts from different difficulty buckets, or dynamic reward shaping - may extend the effective training window.
+- **Longer training past reward_std collapse.** The current runs plateaus quickly at the first few steps due to group homogeneity. Curriculum strategies that maintain rollout diversity - e.g., temperature annealing, mixing prompts from different difficulty buckets, or dynamic reward shaping - may extend the effective training window.
 
 - **Adaptive or learned reward mixing.** All reward combinations in this study use uniform weighting (sum of active signals). Learning the relative weight of each signal - either via meta-gradient methods or a secondary reward model - could improve over fixed hand-designed mixtures.
 
@@ -570,16 +594,14 @@ Analysis of [plots](https://wandb.ai/rentio/grpo-summarization?nw=nwuserrajceo20
 
 - **Multi-domain generalization.** All experiments use a single dataset (Reddit posts, informal register). The same reward signal ablation on formal text (news, scientific abstracts) may produce different orderings, particularly for metrics like [BLEU](#algorithm-1-1) that are sensitive to domain vocabulary.
 
----
 
 ## Acknowledgments
 
 Training infrastructure built with [smolcluster](https://github.com/YuvrajSingh9886/smolcluster) and [MLX](https://github.com/ml-explore/mlx). Rollout generation via [vLLM](https://github.com/vllm-project/vllm). Evaluation via [DeepEval LLM Evals](https://deepeval.com/docs/metrics-llm-evals) with `gpt-5-mini-2025-08-07`. Dataset: [`mlabonne/smoltldr`](https://huggingface.co/datasets/mlabonne/smoltldr). Models: [`mlx-community/Qwen2.5-0.5B-Instruct-bf16`](https://huggingface.co/mlx-community/Qwen2.5-0.5B-Instruct-bf16), [`mlx-community/LFM-2.5-350M-bf16`](https://huggingface.co/mlx-community/LFM-2.5-350M-bf16).
 
 All checkpoints, eval rollouts, and per-example scores are available at:
-- Dataset repo: [`YuvrajSingh9886/reddit-posts-summarization-grpo`](https://huggingface.co/datasets/YuvrajSingh9886/reddit-posts-summarization-grpo)
-- Model weights: [`YuvrajSingh9886`](https://huggingface.co/YuvrajSingh9886) (26 checkpoints)
-- Project card: [`YuvrajSingh9886/grpo-summarization-reward-ablation`](https://huggingface.co/YuvrajSingh9886/grpo-summarization-reward-ablation)
+- Model weights: [`GRPO Reddit Posts Summarization(LFM & Qwen)`](https://huggingface.co/collections/YuvrajSingh9886/grpo-reddit-posts-summarizationlfm-and-qwen) (26 checkpoints)
+- Evaluations data: [`reddit-posts-summarization-grpo`](https://huggingface.co/datasets/YuvrajSingh9886/reddit-posts-summarization-grpo)
 
 ## References
 
@@ -589,3 +611,10 @@ All checkpoints, eval rollouts, and per-example scores are available at:
 4. Papineni et al. (2002). *BLEU: a Method for Automatic Evaluation of Machine Translation.* ACL 2002 - BLEU reward signal.
 5. Lin (2004). *ROUGE: A Package for Automatic Evaluation of Summaries.* ACL Workshop - ROUGE-L reward signal.
 6. Banerjee & Lavie (2005). *METEOR: An Automatic Metric for MT Evaluation.* ACL Workshop - METEOR reward signal.
+7. Kikuchi et al. (2016). *[Controlling Output Length in Neural Encoder-Decoders.](https://aclanthology.org/D16-1140/)* EMNLP 2016.
+8. Liu et al. (2018). *[Controlling Length in Abstractive Summarization Using a Convolutional Neural Network.](https://aclanthology.org/D18-1444/)* EMNLP 2018.
+9. Fan et al. (2018). *[Controllable Abstractive Summarization.](https://aclanthology.org/W18-2706/)* ACL Workshop on NMT 2018.
+10. He et al. (2020). *[Length-controllable Abstractive Summarization by Guiding with Summary Prototype.](https://arxiv.org/abs/2001.07331)* arXiv:2001.07331.
+11. Takase & Okazaki (2019). *[Positional Encoding to Control Output Sequence Length.](https://aclanthology.org/N19-1401/)* NAACL 2019.
+12. Chan et al. (2021). *[Extract, Denoise and Enforce: A Novel Constrained Text Generation Framework.](https://arxiv.org/abs/2108.02859)* arXiv:2108.02859.
+13. Liu et al. (2022). *[Length Control in Abstractive Summarization by Pretraining Information Selection.](https://arxiv.org/abs/2209.14672)* arXiv:2209.14672.

@@ -11,7 +11,7 @@ wandb:
 # Training hyperparameters
 seed: 42                # global random seed for numpy, mlx, python random, and dataset shuffling
 device: "gpu"
-use_kl: true           # use vLLM old_logprobs for clipped-ratio PPO (no ref_model loaded when vllm=true)
+use_kl: true           # true = load a frozen ref_model for KL penalty; false = clip ratio only (saves ~1GB)
 kl_beta: 0.0001           # 0 = pure clipped-ratio PPO; raise to ~0.01 to add KL penalty term
 clip_ratio: 0.2
 max_grad_norm: 1.0    # gradient clipping threshold (0 or null to disable)
