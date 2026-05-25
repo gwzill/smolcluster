@@ -3,6 +3,7 @@
 
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Sequence
@@ -757,7 +758,8 @@ def train(
                     "kl/ratio_mean":       metrics.get("ratio_mean", 0),
                     "kl/clip_frac":        metrics.get("clip_frac", 0),
                     "kl/kl_mean":          metrics.get("kl_mean", 0),
-                    "train/grad_norm":        grad_norm,
+                    "train/grad_norm":        grad_norm if math.isfinite(grad_norm) else 0.0,
+                    "train/grad_norm_overflow": 0.0 if math.isfinite(grad_norm) else 1.0,
                     "train/amp_scale":        scaler.get_scale() if scaler else 1.0,
                     "train/amp_skipped_step": float(skipped_update),
                     "rollouts/num_rollouts":     metrics["num_rollouts"],
