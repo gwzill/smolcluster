@@ -67,7 +67,7 @@ fi
 HF_MODEL_NAME=$(yq '.dp.hf_model_name' "$MODEL_CONFIG")
 ADAPTER_PATH="$SFT_DIR/checkpoints"
 FUSED_MODEL_PATH="$PROJECT_DIR/src/smolcluster/applications/sft/gsm8k/checkpoints/sft_final_fused"
-TASKS="arc_challenge"
+TASKS="gsm8k_cot_zeroshot,ifeval,mmlu,arc_challenge,hellaswag"
 NUM_FEWSHOT=0
 
 BATCH_SIZE="8"
@@ -270,7 +270,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
     exit 0
 fi
 
-"${LM_EVAL_CMD[@]}"
+SESSION="lm_eval_$(date +%Y%m%d_%H%M%S)"
+TMUX_CMD="source ${VENV_ACTIVATE} && cd ${PROJECT_DIR} && $(printf '%q ' "${LM_EVAL_CMD[@]}") && echo '' && echo 'lm_eval complete. Results saved to: ${OUTPUT_PATH}'"
 
+tmux new-session -d -s "$SESSION" "bash -c $(printf '%q' "$TMUX_CMD")"
 echo ""
-echo "lm_eval complete. Results saved to: $OUTPUT_PATH"
+echo "lm_eval running in tmux session: $SESSION"
+echo "  attach with: tmux attach -t $SESSION"
+echo "  output:      $OUTPUT_PATH"
