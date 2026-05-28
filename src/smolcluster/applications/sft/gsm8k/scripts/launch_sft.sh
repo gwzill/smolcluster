@@ -35,8 +35,8 @@ if [[ -f "$PROJECT_DIR/.env" ]]; then
 fi
 
 MODEL_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/model_config_inference.yaml"
-LORA_CONFIG="$SFT_DIR/lora_config.yaml"
-PREPARE_SCRIPT="$SFT_DIR/prepare_data.py"
+LORA_CONFIG="$SFT_DIR/configs/lora_config.yaml"
+PREPARE_SCRIPT="$SFT_DIR/data/prepare_data.py"
 DATA_DIR="$SFT_DIR/data"
 
 VENV_ACTIVATE="$PROJECT_DIR/.venv/bin/activate"
@@ -51,19 +51,28 @@ fi
 SKIP_DATA=false
 DRY_RUN=false
 RUN_TEST=false
+FOREGROUND=false
+CONFIG_OVERRIDE=""
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-data) SKIP_DATA=true;  shift ;;
-        --dry-run)   DRY_RUN=true;    shift ;;
-        --test)      RUN_TEST=true;   shift ;;
+        --skip-data)   SKIP_DATA=true;  shift ;;
+        --dry-run)     DRY_RUN=true;    shift ;;
+        --test)        RUN_TEST=true;   shift ;;
+        --foreground)  FOREGROUND=true; shift ;;
+        --config)      CONFIG_OVERRIDE="$2"; shift 2 ;;
         --help|-h)
-            echo "Usage: bash src/smolcluster/applications/sft/gsm8k/scripts/launch_sft.sh [--skip-data] [--dry-run] [--test] [extra mlx_lm lora flags...]"
+            echo "Usage: bash src/smolcluster/applications/sft/gsm8k/scripts/launch_sft.sh [--skip-data] [--dry-run] [--test] [--foreground] [--config path] [extra mlx_lm lora flags...]"
             exit 0 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+# Override config if provided (used by sweep.py to inject per-trial hyperparams)
+if [[ -n "$CONFIG_OVERRIDE" ]]; then
+    LORA_CONFIG="$CONFIG_OVERRIDE"
+fi
 
 # ---------------------------------------------------------------------------
 # Resolve model name from model config (requires yq)
@@ -84,16 +93,18 @@ cd "$PROJECT_DIR"
 echo "Installing project dependencies..."
 uv pip install -e . -q
 
-if [[ "$SKIP_DATA" == "false" ]]; then
-    echo ""
-    echo "Preparing GSM8K data..."
-    python "$PREPARE_SCRIPT" --model-name "$HF_MODEL_NAME" --out-dir "$DATA_DIR"
-else
+if [[ "$SKIP_DATA" == "true" ]]; then
     echo "Skipping data preparation (--skip-data)"
     if [[ ! -f "$DATA_DIR/train.jsonl" ]]; then
         echo "Error: $DATA_DIR/train.jsonl not found. Run without --skip-data first."
         exit 1
     fi
+elif [[ -f "$DATA_DIR/train.jsonl" && -f "$DATA_DIR/valid.jsonl" && -f "$DATA_DIR/test.jsonl" ]]; then
+    echo "Data already prepared, skipping (train/valid/test.jsonl found)."
+else
+    echo ""
+    echo "Preparing GSM8K data..."
+    python "$PREPARE_SCRIPT" --model-name "$HF_MODEL_NAME" --out-dir "$DATA_DIR"
 fi
 
 # ---------------------------------------------------------------------------
@@ -140,10 +151,24 @@ if [[ -n "${HF_TOKEN:-}" ]]; then
 fi
 HF_ENV+=("HF_HUB_ENABLE_HF_TRANSFER=1")
 
-env "${HF_ENV[@]}" python -m mlx_lm lora "${LORA_ARGS[@]}"
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
 
-echo ""
-echo "SFT complete. Adapters saved to: $SFT_DIR/checkpoints"
-echo ""
-echo "To fuse adapters into a standalone model:"
-echo "  bash src/smolcluster/applications/sft/gsm8k/scripts/fuse_adapters.sh"
+if [[ "$FOREGROUND" == "true" ]]; then
+    # Run synchronously — used by sweep.py so it can capture stdout/stderr.
+    env "${HF_ENV[@]+"${HF_ENV[@]}"}" "$PYTHON_BIN" -m mlx_lm lora "${LORA_ARGS[@]}"
+else
+    SFT_CMD="$(printf '%q ' "${HF_ENV[@]+"${HF_ENV[@]}"}")$(printf '%q ' "$PYTHON_BIN") -m mlx_lm lora $(printf '%q ' "${LORA_ARGS[@]}")"
+    SFT_CMD+="&& echo '' && echo 'SFT complete. Adapters saved to: ${SFT_DIR}/checkpoints'"
+    SFT_CMD+=" || echo 'SFT FAILED.'"
+
+    SESSION="sft_$(date +%Y%m%d_%H%M%S)"
+    tmux new-session -d -s "$SESSION" "bash -c $(printf '%q' "cd ${PROJECT_DIR} && ${SFT_CMD}") ; echo '' ; echo 'Press any key to close.' ; read -n1"
+
+    echo ""
+    echo "SFT running in tmux session: $SESSION"
+    echo "  attach with: tmux attach -t $SESSION"
+    echo "  adapters:    $SFT_DIR/checkpoints"
+    echo ""
+    echo "To fuse adapters after training:"
+    echo "  bash src/smolcluster/applications/sft/gsm8k/scripts/fuse_adapters.sh"
+fi

@@ -238,43 +238,62 @@ else
     MODEL_ARGS="pretrained=${EVAL_MODEL_PATH},peft=${ADAPTER_PATH},trust_remote_code=True"
 fi  # end adapter/direct-model branch
 
-LM_EVAL_CMD=(
-    python -m lm_eval
+BASE_LM_EVAL_ARGS=(
+    "${PROJECT_DIR}/.venv/bin/python" -m lm_eval
     --model hf
     --model_args "$MODEL_ARGS"
-    --tasks "$TASKS"
     --num_fewshot "$NUM_FEWSHOT"
     --batch_size "$BATCH_SIZE"
     --device "$DEVICE"
-    --output_path "$OUTPUT_PATH"
 )
 
 if [[ -n "$LIMIT" ]]; then
-    LM_EVAL_CMD+=(--limit "$LIMIT")
+    BASE_LM_EVAL_ARGS+=(--limit "$LIMIT")
 fi
 if [[ "$HAS_EXTRA_ARGS" == "true" ]]; then
-    LM_EVAL_CMD+=("${EXTRA_ARGS[@]}")
+    BASE_LM_EVAL_ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
+OUTPUT_DIR="$(dirname "$OUTPUT_PATH")"
+RUN_TS="$(basename "$OUTPUT_PATH" .json)"
+
 echo ""
-echo "Launching lm_eval..."
+echo "Launching lm_eval (one invocation per task)..."
 echo "  eval model source: $EVAL_MODEL_PATH"
 echo "  tasks: $TASKS"
-echo "  output: $OUTPUT_PATH"
+echo "  output dir: $OUTPUT_DIR"
 
 if [[ "$DRY_RUN" == "true" ]]; then
     echo ""
-    echo "Dry-run lm_eval command:"
-    printf '  %q' "${LM_EVAL_CMD[@]}"
-    echo ""
+    echo "Dry-run — per-task commands:"
+    IFS=',' read -r -a TASK_LIST <<< "$TASKS"
+    for task in "${TASK_LIST[@]}"; do
+        task="$(echo "$task" | xargs)"
+        task_output="${OUTPUT_DIR}/${RUN_TS}_${task}.json"
+        printf '  %q' "${BASE_LM_EVAL_ARGS[@]}"
+        printf ' --tasks %q --output_path %q\n' "$task" "$task_output"
+    done
     exit 0
 fi
 
-SESSION="lm_eval_$(date +%Y%m%d_%H%M%S)"
-TMUX_CMD="source ${VENV_ACTIVATE} && cd ${PROJECT_DIR} && $(printf '%q ' "${LM_EVAL_CMD[@]}") && echo '' && echo 'lm_eval complete. Results saved to: ${OUTPUT_PATH}'"
+# Build the per-task loop script to run inside tmux
+INNER_SCRIPT=""
+IFS=',' read -r -a TASK_LIST <<< "$TASKS"
+for task in "${TASK_LIST[@]}"; do
+    task="$(echo "$task" | xargs)"
+    task_output="${OUTPUT_DIR}/${RUN_TS}_${task}.json"
+    CMD_STR="$(printf '%q ' "${BASE_LM_EVAL_ARGS[@]}")"
+    CMD_STR+="--tasks $(printf '%q' "$task") --output_path $(printf '%q' "$task_output")"
+    INNER_SCRIPT+="echo ''; echo '==> Running task: ${task}'; "
+    INNER_SCRIPT+="${CMD_STR} && echo '==> Done: ${task} -> ${task_output}' || echo '==> FAILED: ${task}'; "
+done
+INNER_SCRIPT+="echo ''; echo 'All tasks complete.'"
 
-tmux new-session -d -s "$SESSION" "bash -c $(printf '%q' "$TMUX_CMD")"
+SESSION="lm_eval_$(date +%Y%m%d_%H%M%S)"
+TMUX_CMD="source ${VENV_ACTIVATE} && cd ${PROJECT_DIR} && ${INNER_SCRIPT}"
+
+tmux new-session -d -s "$SESSION" "bash -c $(printf '%q' "$TMUX_CMD") ; echo '' ; echo 'Press any key to close.' ; read -n1"
 echo ""
 echo "lm_eval running in tmux session: $SESSION"
 echo "  attach with: tmux attach -t $SESSION"
-echo "  output:      $OUTPUT_PATH"
+echo "  results dir: $OUTPUT_DIR"

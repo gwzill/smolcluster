@@ -8,6 +8,7 @@ The implementation is organized around one training process that updates the pol
 
 ## Table of Contents
 
+- [Getting Started](#getting-started)
 - [How GRPO Works](#how-grpo-works)
 - [GSM8K](#gsm8k)
   - [Training](#gsm8k-training)
@@ -21,6 +22,22 @@ The implementation is organized around one training process that updates the pol
 - [Config Knobs](#config-knobs)
 - [Folder Structure](#folder-structure)
 - [File Map](#file-map)
+
+---
+
+## Getting Started
+
+Before running any training, set up smolcluster by following the guide at [smolcluster.com](https://smolcluster.com). This covers cluster configuration, inference worker setup, and environment prerequisites.
+
+Once set up, training is a single command from the project root:
+
+```bash
+# GSM8K math reasoning
+uv run src/smolcluster/applications/reasoning/grpo/train_gsm8k.py
+
+# Reddit summarization
+uv run src/smolcluster/applications/reasoning/grpo/train_summarization.py
+```
 
 ---
 
