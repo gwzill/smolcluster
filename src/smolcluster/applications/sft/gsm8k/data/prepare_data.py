@@ -17,7 +17,7 @@ the GRPO reward model targets.
 Usage:
     python prepare_data.py                     # write to ./data/
     python prepare_data.py --val-size 200      # use 200 examples for validation
-    python prepare_data.py --out-dir my/path   # write to a custom directory
+    python prepare_data.py --out-dir /my/path  # write to a custom directory
 """
 
 import argparse
