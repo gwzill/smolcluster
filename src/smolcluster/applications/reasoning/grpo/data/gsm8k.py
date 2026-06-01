@@ -45,6 +45,7 @@ def _format_prompt(question: str, tokenizer: Any | None, prompt: str) -> str:
                 tokenize=False,
                 add_generation_prompt=True,
             )
+        
     # Fallback for tokenizers without chat template support
     except Exception as e:
         logger.error("[data] chat-template formatting failed, returning None: %s", e)

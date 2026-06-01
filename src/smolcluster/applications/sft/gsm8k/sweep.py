@@ -32,7 +32,7 @@ def _stop_after_20(study: optuna.Study, _trial: optuna.trial.FrozenTrial) -> Non
         study.stop()
 
 
-def train_trial(lr: float, rank: int, scale: float) -> float:
+def train_trial(trial: optuna.trial.Trial, lr: float, rank: int, scale: float) -> float:
     last_val_loss = None
 
     cfg = copy.deepcopy(yaml.safe_load(_BASE_CONFIG.read_text()))
@@ -43,7 +43,7 @@ def train_trial(lr: float, rank: int, scale: float) -> float:
     cfg["lora_parameters"]["rank"]  = rank
     cfg["lora_parameters"]["scale"] = scale
     cfg["data"]                     = str(_HERE / "data")
-    cfg.pop("report_to", None)
+    cfg["report_to"] = "wandb"
 
     cfg["lr_schedule"] = {
         "name":        "cosine_decay",
@@ -61,7 +61,7 @@ def train_trial(lr: float, rank: int, scale: float) -> float:
     try:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        env["WANDB_DISABLED"] = "true"
+        env["WANDB_PROJECT"] = "smolcluster-gsm8k-sweep"
 
         proc = subprocess.Popen(
             ["bash", str(_LAUNCH_SFT),
@@ -79,6 +79,7 @@ def train_trial(lr: float, rank: int, scale: float) -> float:
             m = _VAL_RE.search(line)
             if m:
                 last_val_loss = float(m.group(2))
+                trial.report(last_val_loss, step=int(m.group(1)))
 
         proc.wait()
         if proc.returncode != 0:
@@ -94,7 +95,7 @@ def objective(trial: optuna.trial.Trial) -> float:
     lr = trial.suggest_categorical("learning_rate", [1e-4, 2e-4, 2e-5, 5e-4])
     rank = trial.suggest_categorical("rank", [8, 16, 32, 64])
     scale = trial.suggest_categorical("scale", [8.0, 16.0, 32.0, 64.0, 128.0])
-    val_loss = train_trial(lr=lr, rank=rank, scale=scale)
+    val_loss = train_trial(trial=trial, lr=lr, rank=rank, scale=scale)
     trial.set_user_attr("final_val_loss", val_loss)
     return val_loss
 

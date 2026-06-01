@@ -96,6 +96,8 @@ uv run --extra mlx src/smolcluster/applications/sft/gsm8k/data/prepare_data.py -
 
 **GSM8K SFT sweep (Optuna):**
 
+Runs 20 trials using TPE. Each trial logs full training curves (loss, lr, tokens/sec, peak mem) to W&B project `smolcluster-gsm8k-sweep`.
+
 ```bash
 # Run 20-trial sweep (prepares data with --think by default)
 uv sync --extra sweep --extra mlx
@@ -106,10 +108,20 @@ uv run --extra sweep --extra mlx src/smolcluster/applications/sft/gsm8k/sweep.py
 
 # View results (from the gsm8k folder)
 cd src/smolcluster/applications/sft/gsm8k
-uv run --extra sweep optuna-dashboard sqlite:///data/optuna/optuna_gsm8k_sweep.db
+uv run --extra sweep optuna-dashboard sqlite:///data/optuna/optuna_gsm8k_sweep_think.db
 ```
 
-Study persists to `optuna_gsm8k_sweep.db`. Re-run to continue adding trials.
+Study persists in `data/optuna/`. Re-run to continue adding trials.
+
+To inspect results with the Optuna Dashboard:
+
+```bash
+# From the gsm8k folder
+cd src/smolcluster/applications/sft/gsm8k
+uv run --extra sweep optuna-dashboard sqlite:///data/optuna/optuna_gsm8k_sweep_think.db
+```
+
+Then open http://127.0.0.1:8080/ in your browser. The History tab shows per-trial val_loss curves (reported at Iters 100, 200, 300, 400, 500).
 
 ### GSM8K Rewards
 

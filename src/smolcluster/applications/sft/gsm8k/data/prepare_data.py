@@ -77,9 +77,16 @@ def _build_examples(
         numeric = extract_answer_from_gsm8k(answer_raw)
         if numeric is None:
             continue
-        prompt = _format_prompt(question, tokenizer, NO_THINK_PROMPT if not use_think else PROMPT)
+        # prompt = _format_prompt(question, tokenizer, NO_THINK_PROMPT if not use_think else PROMPT, mlx=True)
+        
         completion = _build_cot(answer_raw, numeric, use_think=use_think)
-        records.append({"prompt": prompt, "completion": completion})
+        messages = [
+                {"role": "system", "content": PROMPT if use_think else NO_THINK_PROMPT},
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": completion}, 
+            ]
+        # records.append({"prompt": prompt, "completion": completion})
+        records.append({"messages": messages})
         if max_examples is not None and len(records) >= max_examples:
             break
     return records

@@ -29,20 +29,18 @@ num_layers: -1                 # -1 = all transformer layers
 lora_parameters:
     rank: 32                     # LoRA rank (this is the key that defines rank)
     scale: 8.0
-    dropout: 0.0
+    dropout: 0.05
 
 # ---------------------------------------------------------------------------
 # Training hyper-parameters
 # ---------------------------------------------------------------------------
 batch_size: 4
-iters: 1000
-learning_rate: 2.0e-5
+iters: 500
 optimizer: adamw
 lr_schedule:
   name: cosine_decay
-  arguments: [2.0e-4, 1000, 2.0e-6]  # [init_lr, decay_steps=iters, end_lr=1% of init]
-  warmup: 50                           # linear warmup 0 → init_lr over 50 steps
-  warmup_init: 0.0
+  arguments: [2.0e-5, 500, 2.0e-6]  # [init_lr, decay_steps=iters, end_lr=1% of init]
+  warmup: 25                          # 5% of iters — matches what Optuna sweep used
 grad_accumulation_steps: 4     # effective batch = 4 × 4 = 16
 max_seq_length: 768
 
@@ -58,7 +56,7 @@ grad_checkpoint: true          # saves ~30 % memory on small chips
 # ---------------------------------------------------------------------------
 # Adapter output path
 # ---------------------------------------------------------------------------
-adapter_path: src/smolcluster/applications/sft/gsm8k/checkpoints
+adapter_path: src/smolcluster/applications/sft/gsm8k/checkpoints/sft-think/adapters
 
 # ---------------------------------------------------------------------------
 # Logging (optional — remove report_to if not using wandb)
