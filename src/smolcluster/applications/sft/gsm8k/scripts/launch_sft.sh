@@ -53,6 +53,7 @@ DRY_RUN=false
 RUN_TEST=false
 FOREGROUND=false
 CONFIG_OVERRIDE=""
+THINK_MODE="--think"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -62,8 +63,9 @@ while [[ $# -gt 0 ]]; do
         --test)        RUN_TEST=true;   shift ;;
         --foreground)  FOREGROUND=true; shift ;;
         --config)      CONFIG_OVERRIDE="$2"; shift 2 ;;
+        --think|--no-think) THINK_MODE="$1"; shift ;;
         --help|-h)
-            echo "Usage: bash src/smolcluster/applications/sft/gsm8k/scripts/launch_sft.sh [--skip-data] [--dry-run] [--test] [--foreground] [--config path] [extra mlx_lm lora flags...]"
+            echo "Usage: bash src/smolcluster/applications/sft/gsm8k/scripts/launch_sft.sh [--skip-data] [--dry-run] [--test] [--foreground] [--think|--no-think] [--config path] [extra mlx_lm lora flags...]"
             exit 0 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
@@ -103,8 +105,8 @@ elif [[ -f "$DATA_DIR/train.jsonl" && -f "$DATA_DIR/valid.jsonl" && -f "$DATA_DI
     echo "Data already prepared, skipping (train/valid/test.jsonl found)."
 else
     echo ""
-    echo "Preparing GSM8K data..."
-    python "$PREPARE_SCRIPT" --model-name "$HF_MODEL_NAME" --out-dir "$DATA_DIR"
+    echo "Preparing GSM8K data ($THINK_MODE)..."
+    python "$PREPARE_SCRIPT" --model-name "$HF_MODEL_NAME" --out-dir "$DATA_DIR" "$THINK_MODE"
 fi
 
 # ---------------------------------------------------------------------------

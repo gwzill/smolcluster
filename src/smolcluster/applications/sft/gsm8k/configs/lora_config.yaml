@@ -27,7 +27,7 @@ mask_prompt: true              # only compute loss on the completion (not the pr
 # ---------------------------------------------------------------------------
 num_layers: -1                 # -1 = all transformer layers
 lora_parameters:
-    rank: 16                     # LoRA rank (this is the key that defines rank)
+    rank: 32                     # LoRA rank (this is the key that defines rank)
     scale: 8.0
     dropout: 0.0
 
@@ -36,7 +36,7 @@ lora_parameters:
 # ---------------------------------------------------------------------------
 batch_size: 4
 iters: 1000
-learning_rate: 2.0e-4
+learning_rate: 2.0e-5
 optimizer: adamw
 lr_schedule:
   name: cosine_decay
@@ -54,7 +54,7 @@ steps_per_eval: 100
 val_batches: -1                # use the full validation set
 save_every: 200
 grad_checkpoint: true          # saves ~30 % memory on small chips
-report_to: wandb                # logging to WandB for SFT (optional)
+
 # ---------------------------------------------------------------------------
 # Adapter output path
 # ---------------------------------------------------------------------------
@@ -63,5 +63,5 @@ adapter_path: src/smolcluster/applications/sft/gsm8k/checkpoints
 # ---------------------------------------------------------------------------
 # Logging (optional — remove report_to if not using wandb)
 # ---------------------------------------------------------------------------
-# report_to: wandb
-# project_name: smolcluster-sft-gsm8k
+report_to: wandb
+project_name: smolcluster-gsm8k
