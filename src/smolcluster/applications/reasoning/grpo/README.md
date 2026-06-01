@@ -29,14 +29,16 @@ The implementation is organized around one training process that updates the pol
 
 Before running any training, set up smolcluster by following the guide at [smolcluster.com](https://smolcluster.com). This covers cluster configuration, inference worker setup, and environment prerequisites.
 
-Once set up, training is a single command from the project root:
+Once set up, install dependencies and train from the project root:
 
 ```bash
+uv sync --extra mlx --extra eval
+
 # GSM8K math reasoning
-uv run src/smolcluster/applications/reasoning/grpo/train_gsm8k.py
+uv run --extra mlx --extra eval src/smolcluster/applications/reasoning/grpo/train_gsm8k.py
 
 # Reddit summarization
-uv run src/smolcluster/applications/reasoning/grpo/train_summarization.py
+uv run --extra mlx --extra eval src/smolcluster/applications/reasoning/grpo/train_summarization.py
 ```
 
 ---
@@ -72,8 +74,42 @@ The default GRPO configuration lives in `src/smolcluster/configs/reasoning/grpo/
 
 ```bash
 cd src/smolcluster/applications/reasoning/grpo
-uv run train_gsm8k.py
+uv sync --extra mlx --extra eval
+uv run --extra mlx --extra eval train_gsm8k.py
 ```
+
+**GSM8K SFT data preparation:**
+
+The SFT pipeline expects data in `data/train.jsonl`, `data/valid.jsonl`, `data/test.jsonl`.
+
+```bash
+# Default: wraps reasoning in <think> and answer in <answer> tags
+uv sync --extra mlx
+uv run --extra mlx src/smolcluster/applications/sft/gsm8k/data/prepare_data.py
+
+# No-think: plain chain-of-thought + answer, no tags
+uv run --extra mlx src/smolcluster/applications/sft/gsm8k/data/prepare_data.py --no-think
+
+# Options
+uv run --extra mlx src/smolcluster/applications/sft/gsm8k/data/prepare_data.py --help
+```
+
+**GSM8K SFT sweep (Optuna):**
+
+```bash
+# Run 20-trial sweep (prepares data with --think by default)
+uv sync --extra sweep --extra mlx
+uv run --extra sweep --extra mlx src/smolcluster/applications/sft/gsm8k/sweep.py
+
+# Run sweep with no-think data
+uv run --extra sweep --extra mlx src/smolcluster/applications/sft/gsm8k/sweep.py --no-think
+
+# View results (from the gsm8k folder)
+cd src/smolcluster/applications/sft/gsm8k
+uv run --extra sweep optuna-dashboard sqlite:///data/optuna/optuna_gsm8k_sweep.db
+```
+
+Study persists to `optuna_gsm8k_sweep.db`. Re-run to continue adding trials.
 
 ### GSM8K Rewards
 
@@ -104,7 +140,8 @@ Computes sampled accuracy-style metrics and supports checkpoint comparison.
 ```bash
 export OPENAI_API_KEY=your_key_here
 cd src/smolcluster/applications/reasoning/grpo/evaluation
-uv run evaluate_gsm8k.py --checkpoint-dir ../../checkpoints/grpo-gsm8k/latest
+uv sync --extra mlx --extra eval
+uv run --extra mlx --extra eval evaluate_gsm8k.py --checkpoint-dir ../../checkpoints/grpo-gsm8k/latest
 ```
 
 ---
@@ -119,7 +156,8 @@ uv run evaluate_gsm8k.py --checkpoint-dir ../../checkpoints/grpo-gsm8k/latest
 
 ```bash
 cd src/smolcluster/applications/reasoning/grpo
-uv run train_summarization.py
+uv sync --extra mlx --extra eval
+uv run --extra mlx --extra eval train_summarization.py
 ```
 
 ### Summarization Rewards
@@ -183,7 +221,8 @@ Generates summaries on the validation split, then scores each with four LLM-judg
 ```bash
 export OPENAI_API_KEY=your_key_here
 cd src/smolcluster/applications/reasoning/grpo/evaluation
-uv run evaluate_summarization.py --checkpoint-dir ../../checkpoints/grpo-summarization-length-quality/latest
+uv sync --extra mlx --extra eval
+uv run --extra mlx --extra eval evaluate_summarization.py --checkpoint-dir ../../checkpoints/grpo-summarization-length-quality/latest
 ```
 
 #### Compare two evaluation runs
@@ -194,7 +233,8 @@ Compares two saved summarization eval runs with paired significance tests on per
 
 ```bash
 cd src/smolcluster/applications/reasoning/grpo/evaluation
-uv run python compare_eval_runs.py \
+uv sync --extra mlx --extra eval
+uv run --extra mlx --extra eval python compare_eval_runs.py \
   --baseline-run grpo-summarization-length-only \
   --candidate-run grpo-summarization-length-quality \
   --alpha 0.05

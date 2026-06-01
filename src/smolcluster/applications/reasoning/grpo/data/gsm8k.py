@@ -32,12 +32,12 @@ def extract_answer_from_gsm8k(gsm8k_answer: str) -> float | None:
         return None
 
 
-def _format_prompt(question: str, tokenizer: Any | None) -> str:
+def _format_prompt(question: str, tokenizer: Any | None, prompt: str) -> str:
 
     try:
         if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
             messages = [
-                {"role": "system", "content": PROMPT},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": question},
             ]
             return tokenizer.apply_chat_template(
@@ -78,12 +78,12 @@ def build_train_val_examples(
     val_split   = dataset[data_config["val_split"]]
 
     train_examples = [
-        (_format_prompt(q, tokenizer), ans)
+        (_format_prompt(q, tokenizer, PROMPT), ans)
         for q, a in zip(train_split["question"], train_split["answer"], strict=False)
         if (ans := extract_answer_from_gsm8k(a)) is not None
     ]
     val_examples = [
-        (_format_prompt(q, tokenizer), ans)
+        (_format_prompt(q, tokenizer, PROMPT), ans)
         for q, a in zip(val_split["question"], val_split["answer"], strict=False)
         if (ans := extract_answer_from_gsm8k(a)) is not None
     ]

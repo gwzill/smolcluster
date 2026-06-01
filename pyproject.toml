@@ -50,21 +50,15 @@ dev = [
 dashboard = [
     "aiofiles>=23.0.0",
 ]
+sweep = [
+    "optuna>=3.6.1",
+    "optuna-dashboard>=0.20.0",
+]
 mlx = [
     "mlx>=0.31.1",
     "mlx-lm>=0.31.1",
 ]
 eval = [
-    "accelerate>=0.31.1",
-    "deepeval>=3.9.6",
-    "google-genai>=1.71.0",
-    "pandas>=2.3.3",
-    "pyarrow>=22.0.0",
-    "scipy>=1.15.3",
-]
-grpo = [
-    "mlx>=0.31.1",
-    "mlx-lm>=0.31.1",
     "accelerate>=0.31.1",
     "deepeval>=3.9.6",
     "google-genai>=1.71.0",
