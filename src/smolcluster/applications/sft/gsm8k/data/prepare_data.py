@@ -7,15 +7,14 @@ Produces three files under the data/ directory expected by mlx_lm lora:
   data/valid.jsonl
   data/test.jsonl   (uses GSM8K test split for both valid and test)
 
-Each record uses the "prompt" / "completion" format accepted by mlx_lm
-CompletionsDataset (--mask-prompt is supported this way).
-
-The completion wraps the chain-of-thought inside <think>...</think> and
-the final numeric answer inside <answer>...</answer>, matching the format
-the GRPO reward model targets.
+Each record uses the "messages" format accepted by mlx_lm ChatDataset.
+The assistant turn wraps the chain-of-thought inside <think>...</think> and
+the final numeric answer inside <answer>...</answer> (--think, default), or
+plain chain-of-thought followed by the numeric answer (--no-think).
 
 Usage:
     python prepare_data.py                     # write to ./data/
+    python prepare_data.py --no-think          # plain CoT format
     python prepare_data.py --val-size 200      # use 200 examples for validation
     python prepare_data.py --out-dir /my/path  # write to a custom directory
 """
@@ -50,16 +49,10 @@ NO_THINK_PROMPT = (
     "to reach the correct answer. The FINAL answer must be written as a numeric value at the end of the response, and the reasoning process should be included as a chain-of-thought before the final answer."
 )
 
-def _build_cot(gsm8k_solution: str, numeric_answer: float, use_think: bool = True) -> str:
-    """Build the completion text for a GSM8K example.
 
-    With --think (default): wraps reasoning in <think>...</think> and
-    answer in <answer>...</answer>.
-    With --no-think: plain chain-of-thought followed by the numeric answer.
-    """
-    # Strip the #### line — the think block should just be the reasoning.
+def _build_cot(gsm8k_solution: str, numeric_answer: float, use_think: bool = True) -> str:
+    """Build the completion text for a GSM8K example."""
     cot = re.sub(r"\s*####.*", "", gsm8k_solution).strip()
-   
     if use_think:
         return f"<think>\n{cot}\n</think>\n<answer>{numeric_answer}</answer>"
     else:
@@ -77,15 +70,12 @@ def _build_examples(
         numeric = extract_answer_from_gsm8k(answer_raw)
         if numeric is None:
             continue
-        # prompt = _format_prompt(question, tokenizer, NO_THINK_PROMPT if not use_think else PROMPT, mlx=True)
-        
         completion = _build_cot(answer_raw, numeric, use_think=use_think)
         messages = [
-                {"role": "system", "content": PROMPT if use_think else NO_THINK_PROMPT},
-                {"role": "user", "content": question},
-                {"role": "assistant", "content": completion}, 
-            ]
-        # records.append({"prompt": prompt, "completion": completion})
+            {"role": "system", "content": PROMPT if use_think else NO_THINK_PROMPT},
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": completion},
+        ]
         records.append({"messages": messages})
         if max_examples is not None and len(records) >= max_examples:
             break
@@ -99,10 +89,6 @@ def _write_jsonl(records: list[dict[str, str]], path: Path) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     logger.info("Wrote %d examples → %s", len(records), path)
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare GSM8K SFT data for mlx-lm LoRA training")
@@ -118,7 +104,6 @@ def main() -> None:
                         help="Wrap CoT in <think> and answer in <answer> tags (default: --think)")
     args = parser.parse_args()
 
-    # Resolve model name from config if not provided
     if args.model_name is None:
         import yaml
         cfg_path = _smolcluster_root / "src" / "smolcluster" / "configs" / "inference" / "model_config_inference.yaml"
@@ -141,8 +126,6 @@ def main() -> None:
     val_records = _build_examples(test_split, tokenizer, max_examples=args.val_size, use_think=args.think)
 
     logger.info("Building test set ...")
-    # Reuse the full test split for final evaluation; if --val-size is set we don't
-    # double-count — mlx-lm test is only run when --test flag is passed.
     test_records = _build_examples(test_split, tokenizer, use_think=args.think)
 
     out = Path(args.out_dir)

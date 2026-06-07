@@ -10,6 +10,8 @@
 #
 # Usage:
 #   bash src/smolcluster/applications/sft/gsm8k/scripts/launch_lm_eval_sft.sh
+#   bash src/smolcluster/applications/sft/gsm8k/scripts/launch_lm_eval_sft.sh --think    # use <answer> tag extractor + chat template for gsm8k
+#   bash src/smolcluster/applications/sft/gsm8k/scripts/launch_lm_eval_sft.sh --no-think # use last-number extractor + chat template for gsm8k
 #   bash src/smolcluster/applications/sft/gsm8k/scripts/launch_lm_eval_sft.sh --tasks gsm8k_cot_zeroshot,ifeval
 #   bash src/smolcluster/applications/sft/gsm8k/scripts/launch_lm_eval_sft.sh --no-fuse
 #   bash src/smolcluster/applications/sft/gsm8k/scripts/launch_lm_eval_sft.sh --dry-run
@@ -65,20 +67,24 @@ if [[ ! -f "$MODEL_CONFIG" ]]; then
 fi
 
 HF_MODEL_NAME=$(yq '.dp.hf_model_name' "$MODEL_CONFIG")
-ADAPTER_PATH="$SFT_DIR/checkpoints"
-FUSED_MODEL_PATH="$PROJECT_DIR/src/smolcluster/applications/sft/gsm8k/checkpoints/sft_final_fused"
+ADAPTER_PATH=""          # derived from THINK_MODE after arg parsing if not set explicitly
+FUSED_MODEL_PATH=""      # derived from THINK_MODE after arg parsing if not set explicitly
 TASKS="gsm8k_cot_zeroshot,ifeval,mmlu,arc_challenge,hellaswag"
 NUM_FEWSHOT=0
 
-BATCH_SIZE="8"
+BATCH_SIZE="32"
 DEVICE="mps"  # change to "cuda" if using an NVIDIA GPU; "cpu" also works but is slow
 LIMIT=""
 OUTPUT_PATH=""
 DRY_RUN=false
 FUSE_FIRST=true
 DIRECT_EVAL_MODEL=""   # set via --eval-model; bypasses all adapter logic
+THINK_MODE=""          # "" = stock task, "think" or "nothink" = custom task + apply_chat_template
+FOREGROUND=false
 EXTRA_ARGS=()
 HAS_EXTRA_ARGS=false
+
+CUSTOM_TASKS_DIR="$SFT_DIR/configs/lm_eval_tasks"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -122,6 +128,22 @@ while [[ $# -gt 0 ]]; do
             DIRECT_EVAL_MODEL="$2"
             shift 2
             ;;
+        --base)
+            THINK_MODE="base"
+            shift
+            ;;
+        --think)
+            THINK_MODE="think"
+            shift
+            ;;
+        --no-think)
+            THINK_MODE="nothink"
+            shift
+            ;;
+        --foreground)
+            FOREGROUND=true
+            shift
+            ;;
         --no-fuse)
             FUSE_FIRST=false
             shift
@@ -144,6 +166,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --limit <n|f>            lm_eval --limit for quick runs"
             echo "  --output-path <path>     lm_eval output path"
             echo "  --eval-model <hf|path>   Evaluate any HF model or local path directly (skips all adapter logic)"
+            echo "  --think                  Use <answer> tag extractor + chat template for gsm8k (sft-think model)"
+            echo "  --no-think               Use last-number extractor + chat template for gsm8k (sft-nothink model)"
             echo "  --no-fuse                Evaluate with base+peft adapter (skip fuse step)"
             echo "  --dry-run                Print commands only"
             exit 0
@@ -156,6 +180,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Derive variant-specific paths from THINK_MODE if not explicitly set via flags.
+if [[ -z "$ADAPTER_PATH" ]]; then
+    case "$THINK_MODE" in
+        think)   ADAPTER_PATH="$SFT_DIR/checkpoints/sft-think/adapters" ;;
+        nothink) ADAPTER_PATH="$SFT_DIR/checkpoints/sft-no-think/adapters" ;;
+        *)       ADAPTER_PATH="$SFT_DIR/checkpoints" ;;
+    esac
+fi
+if [[ -z "$FUSED_MODEL_PATH" ]]; then
+    case "$THINK_MODE" in
+        think)   FUSED_MODEL_PATH="$SFT_DIR/checkpoints/sft-think/final_model" ;;
+        nothink) FUSED_MODEL_PATH="$SFT_DIR/checkpoints/sft-no-think/final_model" ;;
+        *)       FUSED_MODEL_PATH="$SFT_DIR/checkpoints/sft_final_fused" ;;
+    esac
+fi
+
 if [[ "$ADAPTER_PATH" != /* ]]; then
     ADAPTER_PATH="$PROJECT_DIR/$ADAPTER_PATH"
 fi
@@ -163,9 +203,17 @@ if [[ "$FUSED_MODEL_PATH" != /* ]]; then
     FUSED_MODEL_PATH="$PROJECT_DIR/$FUSED_MODEL_PATH"
 fi
 
+EVAL_RESULTS_ROOT="$PROJECT_DIR/src/smolcluster/applications/sft/gsm8k/eval-results"
+
 if [[ -z "$OUTPUT_PATH" ]]; then
     ts=$(date +"%Y%m%d_%H%M%S")
-    OUTPUT_PATH="$PROJECT_DIR/src/smolcluster/applications/sft/gsm8k/eval-results/lm_eval_${ts}.json"
+    case "$THINK_MODE" in
+        base)    VARIANT_SUBDIR="base" ;;
+        think)   VARIANT_SUBDIR="sft-think" ;;
+        nothink) VARIANT_SUBDIR="sft-nothink" ;;
+        *)       VARIANT_SUBDIR="misc" ;;
+    esac
+    OUTPUT_PATH="$EVAL_RESULTS_ROOT/${VARIANT_SUBDIR}/lm_eval_${ts}.json"
 elif [[ "$OUTPUT_PATH" != /* ]]; then
     OUTPUT_PATH="$PROJECT_DIR/$OUTPUT_PATH"
 fi
@@ -238,6 +286,19 @@ else
     MODEL_ARGS="pretrained=${EVAL_MODEL_PATH},peft=${ADAPTER_PATH},trust_remote_code=True"
 fi  # end adapter/direct-model branch
 
+# ---------------------------------------------------------------------------
+# Think/nothink mode: swap gsm8k task name and enable chat template
+# ---------------------------------------------------------------------------
+if [[ -n "$THINK_MODE" ]]; then
+    if [[ "$THINK_MODE" == "base" ]]; then
+        CUSTOM_TASK_NAME="gsm8k_cot_zeroshot_base"
+    else
+        CUSTOM_TASK_NAME="gsm8k_cot_zeroshot_sft_${THINK_MODE}"
+    fi
+    TASKS="${TASKS//gsm8k_cot_zeroshot/$CUSTOM_TASK_NAME}"
+    echo "GSM8K task overridden → $CUSTOM_TASK_NAME"
+fi
+
 BASE_LM_EVAL_ARGS=(
     "${PROJECT_DIR}/.venv/bin/python" -m lm_eval
     --model hf
@@ -246,6 +307,18 @@ BASE_LM_EVAL_ARGS=(
     --batch_size "$BATCH_SIZE"
     --device "$DEVICE"
 )
+
+BASE_LM_EVAL_ARGS+=(--apply_chat_template)
+BASE_LM_EVAL_ARGS+=(--log_samples)
+
+if [[ -n "$THINK_MODE" ]]; then
+    BASE_LM_EVAL_ARGS+=(--include_path "$CUSTOM_TASKS_DIR")
+fi
+if [[ "$THINK_MODE" == "think" ]]; then
+    BASE_LM_EVAL_ARGS+=(--system_instruction "You are an Assistant expert at solving math problems. The assistant first thinks about the reasoning process to reach the correct answer within '<think>...</think>' tags and then provides the user with the answer. The FINAL answer must STRICTLY be written as <answer>answer_here</answer> and the thinking process strictly within '<think>...</think>' tags.")
+elif [[ "$THINK_MODE" == "nothink" ]]; then
+    BASE_LM_EVAL_ARGS+=(--system_instruction "You are an Assistant expert at solving math problems. The assistant first thinks about the reasoning process to reach the correct answer. The FINAL answer must be written as a numeric value at the end of the response, and the reasoning process should be included as a chain-of-thought before the final answer.")
+fi
 
 if [[ -n "$LIMIT" ]]; then
     BASE_LM_EVAL_ARGS+=(--limit "$LIMIT")
@@ -287,13 +360,20 @@ for task in "${TASK_LIST[@]}"; do
     INNER_SCRIPT+="echo ''; echo '==> Running task: ${task}'; "
     INNER_SCRIPT+="${CMD_STR} && echo '==> Done: ${task} -> ${task_output}' || echo '==> FAILED: ${task}'; "
 done
-INNER_SCRIPT+="echo ''; echo 'All tasks complete.'"
+INNER_SCRIPT+="echo ''; echo 'All tasks complete.'; "
+GENERATIONS_DIR="${OUTPUT_DIR}/generations"
+INNER_SCRIPT+="mkdir -p ${GENERATIONS_DIR} && "
+INNER_SCRIPT+="find ${OUTPUT_DIR} -maxdepth 1 -name 'samples_*.jsonl' -exec mv {} ${GENERATIONS_DIR}/ \; && "
+INNER_SCRIPT+="echo 'Generations saved to: ${GENERATIONS_DIR}'"
 
-SESSION="lm_eval_$(date +%Y%m%d_%H%M%S)"
-TMUX_CMD="source ${VENV_ACTIVATE} && cd ${PROJECT_DIR} && ${INNER_SCRIPT}"
-
-tmux new-session -d -s "$SESSION" "bash -c $(printf '%q' "$TMUX_CMD") ; echo '' ; echo 'Press any key to close.' ; read -n1"
-echo ""
-echo "lm_eval running in tmux session: $SESSION"
-echo "  attach with: tmux attach -t $SESSION"
-echo "  results dir: $OUTPUT_DIR"
+if [[ "$FOREGROUND" == "true" ]]; then
+    bash -c "${INNER_SCRIPT}"
+else
+    SESSION="lm_eval_$(date +%Y%m%d_%H%M%S)"
+    TMUX_CMD="source ${VENV_ACTIVATE} && cd ${PROJECT_DIR} && ${INNER_SCRIPT}"
+    tmux new-session -d -s "$SESSION" "bash -c $(printf '%q' "$TMUX_CMD") ; echo '' ; echo 'eval done — shell left open, type exit to close.' ; exec bash"
+    echo ""
+    echo "lm_eval running in tmux session: $SESSION"
+    echo "  attach with: tmux attach -t $SESSION"
+    echo "  results dir: $OUTPUT_DIR"
+fi

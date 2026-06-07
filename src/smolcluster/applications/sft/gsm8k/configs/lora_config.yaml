@@ -28,19 +28,19 @@ mask_prompt: true              # only compute loss on the completion (not the pr
 num_layers: -1                 # -1 = all transformer layers
 lora_parameters:
     rank: 32                     # LoRA rank (this is the key that defines rank)
-    scale: 8.0
+    scale: 16.0
     dropout: 0.05
 
 # ---------------------------------------------------------------------------
 # Training hyper-parameters
 # ---------------------------------------------------------------------------
 batch_size: 4
-iters: 500
+iters: 1869                            # 1 full epoch over 7473 train examples at batch_size 4
 optimizer: adamw
 lr_schedule:
   name: cosine_decay
-  arguments: [2.0e-5, 500, 2.0e-6]  # [init_lr, decay_steps=iters, end_lr=1% of init]
-  warmup: 25                          # 5% of iters — matches what Optuna sweep used
+  arguments: [2.0e-5, 1869, 2.0e-6]  # [init_lr, decay_steps=iters, end_lr=1% of init]
+  warmup: 93                          # 5% of 1869 iters
 grad_accumulation_steps: 4     # effective batch = 4 × 4 = 16
 max_seq_length: 768
 
@@ -48,9 +48,9 @@ max_seq_length: 768
 # Evaluation & saving
 # ---------------------------------------------------------------------------
 steps_per_report: 10
-steps_per_eval: 100
+steps_per_eval: 200            # ~9 val points across 1 epoch
 val_batches: -1                # use the full validation set
-save_every: 200
+save_every: 500
 grad_checkpoint: true          # saves ~30 % memory on small chips
 
 # ---------------------------------------------------------------------------

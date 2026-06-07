@@ -113,15 +113,21 @@ uv run --extra sweep optuna-dashboard sqlite:///data/optuna/optuna_gsm8k_sweep_t
 
 Study persists in `data/optuna/`. Re-run to continue adding trials.
 
-To inspect results with the Optuna Dashboard:
+To inspect results with the Optuna Dashboard (run from project root):
 
 ```bash
-# From the gsm8k folder
-cd src/smolcluster/applications/sft/gsm8k
-uv run --extra sweep optuna-dashboard sqlite:///data/optuna/optuna_gsm8k_sweep_think.db
+# think variant
+uv run optuna-dashboard \
+  sqlite:///src/smolcluster/applications/sft/gsm8k/data/optuna/optuna_gsm8k_sweep_think.db \
+  --host 0.0.0.0 --port 8080
+
+# nothink variant
+uv run optuna-dashboard \
+  sqlite:///src/smolcluster/applications/sft/gsm8k/data/optuna/optuna_gsm8k_sweep_nothink.db \
+  --host 0.0.0.0 --port 8080
 ```
 
-Then open http://127.0.0.1:8080/ in your browser. The History tab shows per-trial val_loss curves (reported at Iters 100, 200, 300, 400, 500).
+Then open `http://<your-machine-ip>:8080` from any device on the network. The dashboard updates live as trials complete.
 
 ### GSM8K Rewards
 

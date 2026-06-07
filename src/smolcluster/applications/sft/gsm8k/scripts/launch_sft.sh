@@ -76,6 +76,16 @@ if [[ -n "$CONFIG_OVERRIDE" ]]; then
     LORA_CONFIG="$CONFIG_OVERRIDE"
 fi
 
+# Determine adapter path based on think mode
+ADAPTER_SUBDIR="sft-think"
+if [[ "$THINK_MODE" == "--no-think" ]]; then
+    ADAPTER_SUBDIR="sft-no-think"
+fi
+ADAPTER_PATH="$SFT_DIR/checkpoints/$ADAPTER_SUBDIR/adapters"
+FINAL_MODEL_PATH="$SFT_DIR/checkpoints/$ADAPTER_SUBDIR/final_model"
+mkdir -p "$(dirname "$ADAPTER_PATH")"
+mkdir -p "$FINAL_MODEL_PATH"
+
 # ---------------------------------------------------------------------------
 # Resolve model name from model config (requires yq)
 # ---------------------------------------------------------------------------
@@ -102,11 +112,20 @@ if [[ "$SKIP_DATA" == "true" ]]; then
         exit 1
     fi
 elif [[ -f "$DATA_DIR/train.jsonl" && -f "$DATA_DIR/valid.jsonl" && -f "$DATA_DIR/test.jsonl" ]]; then
-    echo "Data already prepared, skipping (train/valid/test.jsonl found)."
+    # Check if data matches current think mode
+    _format_file="$DATA_DIR/.data_format"
+    if [[ -f "$_format_file" ]] && [[ "$(cat "$_format_file")" == "$THINK_MODE" ]]; then
+        echo "Data already prepared ($THINK_MODE), skipping (train/valid/test.jsonl found)."
+    else
+        echo "Data format changed ($THINK_MODE) — regenerating..."
+        python "$PREPARE_SCRIPT" --model-name "$HF_MODEL_NAME" --out-dir "$DATA_DIR" "$THINK_MODE"
+        echo "$THINK_MODE" > "$_format_file"
+    fi
 else
     echo ""
     echo "Preparing GSM8K data ($THINK_MODE)..."
     python "$PREPARE_SCRIPT" --model-name "$HF_MODEL_NAME" --out-dir "$DATA_DIR" "$THINK_MODE"
+    echo "$THINK_MODE" > "$DATA_DIR/.data_format"
 fi
 
 # ---------------------------------------------------------------------------
@@ -117,6 +136,7 @@ LORA_ARGS=(
     "--model"   "$HF_MODEL_NAME"
     "--data"    "$DATA_DIR"
     "--config"  "$LORA_CONFIG"
+    "--adapter-path" "$ADAPTER_PATH"
 )
 
 if [[ "$RUN_TEST" == "true" ]]; then
@@ -144,7 +164,7 @@ echo ""
 echo "Launching SFT fine-tuning..."
 echo "  Config  : $LORA_CONFIG"
 echo "  Data    : $DATA_DIR"
-echo "  Adapters: $SFT_DIR/checkpoints"
+echo "  Adapters: $ADAPTER_PATH"
 echo ""
 
 HF_ENV=()
@@ -158,9 +178,16 @@ PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
 if [[ "$FOREGROUND" == "true" ]]; then
     # Run synchronously — used by sweep.py so it can capture stdout/stderr.
     env "${HF_ENV[@]+"${HF_ENV[@]}"}" "$PYTHON_BIN" -m mlx_lm lora "${LORA_ARGS[@]}"
+    echo ""
+    echo "Training complete. Fusing adapters..."
+    "$PYTHON_BIN" -m mlx_lm fuse --model "$HF_MODEL_NAME" --adapter-path "$ADAPTER_PATH" --save-path "$FINAL_MODEL_PATH"
+    echo "Fused model saved to $FINAL_MODEL_PATH"
 else
     SFT_CMD="$(printf '%q ' "${HF_ENV[@]+"${HF_ENV[@]}"}")$(printf '%q ' "$PYTHON_BIN") -m mlx_lm lora $(printf '%q ' "${LORA_ARGS[@]}")"
-    SFT_CMD+="&& echo '' && echo 'SFT complete. Adapters saved to: ${SFT_DIR}/checkpoints'"
+    SFT_CMD+="&& echo '' && echo 'Training complete. Fusing adapters...'"
+    SFT_CMD+="&& $(printf '%q ' "$PYTHON_BIN") -m mlx_lm fuse --model $(printf '%q ' "$HF_MODEL_NAME") --adapter-path $(printf '%q ' "$ADAPTER_PATH") --save-path $(printf '%q ' "$FINAL_MODEL_PATH")"
+    SFT_CMD+="&& echo '' && echo 'Fused model saved to: ${FINAL_MODEL_PATH}'"
+    SFT_CMD+=" && echo '' && echo 'SFT complete. Adapters saved to: ${ADAPTER_PATH}'"
     SFT_CMD+=" || echo 'SFT FAILED.'"
 
     SESSION="sft_$(date +%Y%m%d_%H%M%S)"
@@ -169,7 +196,7 @@ else
     echo ""
     echo "SFT running in tmux session: $SESSION"
     echo "  attach with: tmux attach -t $SESSION"
-    echo "  adapters:    $SFT_DIR/checkpoints"
+    echo "  adapters:    $ADAPTER_PATH"
     echo ""
     echo "To fuse adapters after training:"
     echo "  bash src/smolcluster/applications/sft/gsm8k/scripts/fuse_adapters.sh"
