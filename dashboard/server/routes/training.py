@@ -16,6 +16,7 @@ from ..paths import (
     GRAD_INTERVAL,
     GRAD_PING,
     GRPO_TRAIN_SCRIPT_FILE,
+    INFER_CONFIG_FILE,
     INFER_SCRIPT_FILE,
     METRICS_FILE,
     TRAIN_CONFIGS_DIR,
@@ -59,7 +60,7 @@ async def get_training():
 
 
 _ALGO_CONFIG_PATHS = {
-    "grpo": Path(TRAIN_CONFIGS_DIR) / "reasoning" / "grpo" / "config.yaml",
+    "grpo": Path(TRAIN_CONFIGS_DIR) / "reasoning" / "grpo" / "config_gsm8k.yaml",
 }
 
 
@@ -77,6 +78,21 @@ async def get_config(algorithm: str = ""):
     if not config_path.exists():
         raise HTTPException(404, f"Config file not found: {config_path.name}")
     return {"algorithm": algorithm, "filename": str(config_path.name), "yaml": config_path.read_text()}
+
+
+_INFERENCE_CONFIG_PATHS = {
+    "cluster": INFER_CONFIG_FILE,
+    "model":   Path(TRAIN_CONFIGS_DIR) / "inference" / "model_config_inference.yaml",
+}
+
+
+@router.get("/api/config/inference")
+async def get_inference_configs():
+    """Return cluster and model inference config YAMLs."""
+    result = {}
+    for key, path in _INFERENCE_CONFIG_PATHS.items():
+        result[key] = {"filename": path.name, "yaml": path.read_text() if path.exists() else ""}
+    return result
 
 
 @router.post("/api/training/start")
@@ -104,8 +120,6 @@ async def stop_training_endpoint():
     if any(info.get("algorithm") == "grpo" for info in running_before.values()):
         await _ctx.node_manager.run_cleanup_script(str(GRPO_TRAIN_SCRIPT_FILE), log_label)
         await _kill_vllm_on_all_nodes(selected, log_label)
-
-    await _ctx.node_manager.run_cleanup_script(str(INFER_SCRIPT_FILE), log_label)
 
     if _ctx.redis:
         try:

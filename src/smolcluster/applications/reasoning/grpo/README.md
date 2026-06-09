@@ -43,6 +43,50 @@ uv run --extra mlx --extra eval src/smolcluster/applications/reasoning/grpo/trai
 
 ---
 
+## Choosing a Task: GSM8K vs Summarization
+
+There are two training tasks. Each has its own config and train script.
+
+| | GSM8K | Summarization |
+|---|---|---|
+| Task | Math word problems | Reddit TL;DR |
+| Dataset | `openai/gsm8k` | `mlabonne/smoltldr` |
+| Config | `config_gsm8k.yaml` | `config_summarization.yaml` |
+| Train script | `train_gsm8k.py` | `train_summarization.py` |
+| Extra dep | none | `deepeval` |
+
+### Option 1 — Dashboard (click Train)
+
+Open `scripts/launch_grpo_train.sh` and set the default at the top:
+
+```bash
+TRAIN_TARGET="gsm8k"          # math reasoning
+TRAIN_TARGET="summarization"  # reddit summarization
+```
+
+Then click **Train** in the dashboard. The launch script reads `TRAIN_TARGET` and picks the right config and train script automatically.
+
+### Option 2 — Command line
+
+Pass the target directly as an argument:
+
+```bash
+bash src/smolcluster/applications/reasoning/grpo/scripts/launch_grpo_train.sh gsm8k
+bash src/smolcluster/applications/reasoning/grpo/scripts/launch_grpo_train.sh summarization
+```
+
+### Option 3 — Run the train script directly (no cluster)
+
+```bash
+# GSM8K
+uv run --extra mlx src/smolcluster/applications/reasoning/grpo/train_gsm8k.py
+
+# Summarization (requires deepeval: uv pip install deepeval)
+uv run --extra mlx src/smolcluster/applications/reasoning/grpo/train_summarization.py
+```
+
+---
+
 ## How GRPO Works
 
 At a high level, each GRPO step looks like this:
@@ -59,8 +103,6 @@ At a high level, each GRPO step looks like this:
 > The model scores only completion tokens, not prompt tokens, when computing rollout log-probabilities.
 
 Read more about GRPO [here](https://www.alphaxiv.org/abs/2402.03300).
-
-The default GRPO configuration lives in `src/smolcluster/configs/reasoning/grpo/config.yaml`.
 
 ---
 
@@ -180,7 +222,7 @@ uv run --extra mlx --extra eval train_summarization.py
 
 ### Summarization Rewards
 
-The summarization training path uses composable reward signals implemented in `rewards/summarization_rewards.py`. Each signal is toggled independently via `quality_metrics` in `config.yaml`.
+The summarization training path uses composable reward signals implemented in `rewards/summarization_rewards.py`. Each signal is toggled independently via `quality_metrics` in `config_summarization.yaml`.
 
 #### Quality metrics (`calculate_summary_quality`)
 
@@ -367,7 +409,7 @@ All final checkpoints are uploaded as individual HF model repos.
 
 ## Config Knobs
 
-The most important GRPO settings live in `config.yaml`.
+The most important GRPO settings live in `config_summarization.yaml` (or `config_gsm8k.yaml` for GSM8K).
 
 | Key | What it controls |
 |---|---|
@@ -390,7 +432,8 @@ The most important GRPO settings live in `config.yaml`.
 
 Related config files:
 
-- `src/smolcluster/configs/reasoning/grpo/config.yaml`
+- `src/smolcluster/configs/reasoning/grpo/config_summarization.yaml`
+- `src/smolcluster/configs/reasoning/grpo/config_gsm8k.yaml`
 - `src/smolcluster/configs/inference/model_config_inference.yaml`
 - `src/smolcluster/configs/inference/cluster_config_inference.yaml`
 

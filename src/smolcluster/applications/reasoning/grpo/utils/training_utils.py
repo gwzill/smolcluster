@@ -279,12 +279,11 @@ class RolloutPrefetcher:
         self._thread: threading.Thread | None = None
 
     def submit(self, prompts: list[str], answers: list[str], step: int | None = None) -> None:
-        import time as _time
-        _start = _time.monotonic()
+        start = time.monotonic()
 
         def _run() -> None:
             result = self._fetch_fn(prompts, answers, step)
-            elapsed = _time.monotonic() - _start
+            elapsed = time.monotonic() - start
             self._queue.put((result, elapsed))
 
         self._thread = threading.Thread(target=_run, daemon=True)
@@ -525,11 +524,26 @@ def publish_dashboard_metrics(
             est_throughput = round(token_count / step_time_s, 1)
         rollout_time_s = float(metrics.get("rollout_time_s") or 0)
         _tbase = rollout_time_s if rollout_time_s > 0.0 else step_time_s
-        prompt_count = float(metrics.get("prompt_token_len_mean", 0) or 0) * float(
-            metrics.get("num_rollouts", 0) or 0
-        )
-        tok_sec_in = round(prompt_count / _tbase, 1) if (_tbase and prompt_count > 0.0) else est_throughput
-        tok_sec_out = round(token_count / _tbase, 1) if (_tbase and token_count > 0.0) else est_throughput
+        prompt_token_len_mean = float(metrics.get("prompt_token_len_mean", 0) or 0)
+        prompt_count = prompt_token_len_mean * float(metrics.get("num_rollouts", 0) or 0)
+        # tok_sec_in: prefill throughput = prompt_tokens_per_req / TTFT p50 (median across workers).
+        # tok_sec_out: decode throughput  = 1 / TPOT p50 (median across workers).
+        # Both pulled from vLLM's Prometheus /metrics histogram; same function, same worker loop.
+        # Fallback to rollout-time estimates if /metrics is unavailable.
+        ttft_p50_ms = float(metrics.get("ttft_p50_ms") or 0)
+        tpot_p50_ms = float(metrics.get("tpot_p50_ms") or 0)
+        if ttft_p50_ms > 0 and prompt_token_len_mean > 0:
+            tok_sec_in = round(prompt_token_len_mean / (ttft_p50_ms / 1000), 1)
+        elif _tbase and prompt_count > 0.0:
+            tok_sec_in = round(prompt_count / _tbase, 1)
+        else:
+            tok_sec_in = est_throughput
+        if tpot_p50_ms > 0:
+            tok_sec_out = round(1000.0 / tpot_p50_ms, 1)
+        elif _tbase and token_count > 0.0:
+            tok_sec_out = round(token_count / _tbase, 1)
+        else:
+            tok_sec_out = est_throughput
         eta_remaining = None
         if step_time_s and step_time_s > 0.0 and total_steps and total_steps > 0:
             steps_left = max(0, int(total_steps) - int(global_step))

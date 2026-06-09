@@ -11,22 +11,9 @@ After every `weight_sync.sync_steps` training steps this module:
   4. Restarts vLLM on each worker with the updated model directory.
   5. Polls each worker's /health endpoint until it is ready.
 
-Required config.yaml keys (under `weight_sync`):
-    sync_steps          int   – sync every N steps (0 = disabled)
-  checkpoint_dir      str   – local path relative to project root, e.g. "checkpoints/grpo"
-  remote_model_dir    str   – absolute path on workers that contains the full model
-                              (config.json + tokenizer + weights), e.g. "/home/ubuntu/grpo_model"
-
-From cluster_config_inference.yaml:
-  host_ip             dict  – hostname → IP mapping, e.g. {mini1: "10.10.0.1", ...}
-  workers.regular[].user str – per-worker SSH user, e.g. yuvrajsingh2
-  remote_weights_filename str – filename inside remote_model_dir to overwrite, default "model.safetensors"
-  vllm_start_cmd      str   – shell command to (re)start vLLM; {model_dir}, {port}, {rank},
-                              {vllm_activate} are substituted.  Default: tmux-based launch.
-  health_retries      int   – number of health-check attempts before giving up (default 30)
-  health_interval     int   – seconds between health checks (default 5)
 """
 
+import json
 import logging
 import shlex
 import subprocess
@@ -39,6 +26,7 @@ import mlx.core as mx
 import requests
 import yaml
 from mlx.utils import tree_flatten
+from mlx_lm.utils import save_config as mlx_save_config
 
 from smolcluster.utils import emit_smol_event
 
@@ -108,36 +96,33 @@ def save_policy_weights(
         ``<project_root>/checkpoints/grpo/step_10/`` or
         ``<project_root>/checkpoints/grpo/latest/``.
     """
-    import json
-
-    from mlx_lm.utils import save_config as mlx_save_config
-
     step_dir_name = f"step_{step}" if isinstance(step, int) else str(step)
     step_dir = _project_root / checkpoint_dir / step_dir_name
     step_dir.mkdir(parents=True, exist_ok=True)
 
     lora_modules = [(n, m) for n, m in model.named_modules() if hasattr(m, "fuse")]
     if lora_modules:
-        # Save only LoRA adapter weights — workers keep the original 4-bit base model
+        # Save only LoRA adapter weights locally. The worker will fuse them into the base
+        # model via `mlx_lm.fuse` before restarting vLLM (vllm-metal issue #326: --enable-lora
+        # not yet supported, so we serve the merged full model instead).
         adapter_dir = step_dir / "adapters"
         adapter_dir.mkdir(exist_ok=True)
         adapter_weights = dict(tree_flatten(model.trainable_parameters()))
         mx.eval(list(adapter_weights.values()))
         mx.save_safetensors(str(adapter_dir / "adapters.safetensors"), adapter_weights)
 
-        # Write adapter_config.json — infer rank and scale from the first LoRA module
         _, first_lora = lora_modules[0]
-        rank = int(first_lora.lora_a.shape[0])
+        # lora_a shape: (input_dims, r)  → shape[1] is rank
+        # lora_b shape: (r, output_dims) → shape[0] is rank
+        rank = int(first_lora.lora_b.shape[0])
         scale = float(first_lora.scale)
-        adapter_cfg = {
-            "lora_parameters": {
-                "rank": rank,
-                "alpha": scale * rank,
-                "dropout": 0.0,
-                "scale": scale,
-            }
-        }
-        (adapter_dir / "adapter_config.json").write_text(json.dumps(adapter_cfg, indent=2))
+        import json
+        # num_layers is required by _load_adapters → linear_to_lora_layers.
+        # -1 means all layers (matches lora_num_layers: -1 in grpo config).
+        (adapter_dir / "adapter_config.json").write_text(json.dumps({
+            "num_layers": -1,
+            "lora_parameters": {"rank": rank, "alpha": scale * rank, "dropout": 0.0, "scale": scale},
+        }, indent=2))
         logger.info("[weight_sync] Checkpoint %s — LoRA adapters saved to %s", step_dir_name, adapter_dir)
         return step_dir
 
@@ -319,14 +304,8 @@ def _sync_single_worker(
         vllm_activate=vllm_activate,
         max_model_len=max_model_len,
     )
-    if is_lora:
-        # Inject --adapter-path before the output redirect so it lands inside
-        # the bash -c string regardless of the template shape.
-        adapter_flag = f"--adapter-path {shlex.quote(remote_adapter_dir)}"
-        if "2>&1" in vllm_start_cmd:
-            vllm_start_cmd = vllm_start_cmd.replace("2>&1", f"{adapter_flag} 2>&1", 1)
-        else:
-            vllm_start_cmd += f" {adapter_flag}"
+    # No --enable-lora injection: vllm-metal does not support LoRA serving (issue #326).
+    # Instead we fuse adapters into the base model on the worker before restarting vLLM.
 
     local_weights_file = local_weights_dir / "model.safetensors"
     remote_weights_path = f"{remote_model_dir}/{remote_weights_filename}"
@@ -345,16 +324,17 @@ def _sync_single_worker(
         _scp_model_files(hostname, local_model_dir, remote_model_dir)
 
     # 3. Clean stale weight shards on remote before uploading new weights.
-    # Old shard files (model-00001-of-NNNNN.safetensors, model.safetensors.index.json)
-    # left from a previous model setup would cause vLLM to load wrong/mixed weights.
-    clean_cmd = (
-        f"rm -f {shlex.quote(remote_model_dir)}/*.safetensors "
-        f"{shlex.quote(remote_model_dir)}/*.bin "
-        f"{shlex.quote(remote_model_dir)}/*.pt "
-        f"{shlex.quote(remote_model_dir)}/model.safetensors.index.json"
-    )
-    _run_ssh(hostname, clean_cmd)
-    logger.info("[weight_sync] worker %d (%s): stale remote weights cleaned", rank, hostname)
+    # For LoRA mode the base model weights in remote_model_dir must not be touched —
+    # mlx_lm.fuse reads them to merge adapters in-place.
+    if not is_lora:
+        clean_cmd = (
+            f"rm -f {shlex.quote(remote_model_dir)}/*.safetensors "
+            f"{shlex.quote(remote_model_dir)}/*.bin "
+            f"{shlex.quote(remote_model_dir)}/*.pt "
+            f"{shlex.quote(remote_model_dir)}/model.safetensors.index.json"
+        )
+        _run_ssh(hostname, clean_cmd)
+        logger.info("[weight_sync] worker %d (%s): stale remote weights cleaned", rank, hostname)
 
     # 4. Copy weights or LoRA adapters to the worker.
     emit_smol_event("weight_sync", "out", "grpo")
@@ -363,6 +343,25 @@ def _sync_single_worker(
         for fname in ["adapters.safetensors", "adapter_config.json"]:
             _scp_file(adapter_dir / fname, hostname, f"{remote_adapter_dir}/{fname}")
         logger.info("[weight_sync] worker %d (%s): LoRA adapters uploaded", rank, hostname)
+
+        # 4a. Fuse adapters into the base model on the worker using mlx_lm.fuse.
+        #     This overwrites remote_model_dir/model.safetensors with merged weights.
+        #     vLLM is then restarted as a plain model — no --enable-lora needed.
+        fuse_cmd = (
+            f"source {shlex.quote(vllm_activate)} && "
+            f"python -m mlx_lm.fuse "
+            f"--model {shlex.quote(remote_model_dir)} "
+            f"--adapter-path {shlex.quote(remote_adapter_dir)} "
+            f"--save-path {shlex.quote(remote_model_dir)}"
+        )
+        logger.info("[weight_sync] worker %d (%s): fusing adapters into base model ...", rank, hostname)
+        fuse_result = _run_ssh(hostname, fuse_cmd, timeout=120, use_login_shell=True)
+        if fuse_result.returncode != 0:
+            raise RuntimeError(
+                f"mlx_lm.fuse failed on worker {rank} ({hostname}): "
+                f"{fuse_result.stderr.strip() or fuse_result.stdout.strip()}"
+            )
+        logger.info("[weight_sync] worker %d (%s): fuse complete", rank, hostname)
     else:
         _scp_file(local_weights_file, hostname, remote_weights_path)
         logger.info("[weight_sync] worker %d (%s): weights uploaded", rank, hostname)

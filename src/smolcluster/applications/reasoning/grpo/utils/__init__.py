@@ -16,6 +16,7 @@ from .rollouts import (
     build_batched_rollout_texts,
     build_rollouts_per_prompt,
     build_vllm_worker_urls,
+    fetch_vllm_perf_metrics,
 )
 from .training_utils import (
     DASHBOARD_GRAD_INTERVAL,
@@ -73,6 +74,7 @@ __all__ = [
     "build_batched_rollout_texts",
     "build_rollouts_per_prompt",
     "build_vllm_worker_urls",
+    "fetch_vllm_perf_metrics",
     "save_policy_weights",
     "sync_and_reload_workers",
     "aggregate_metric_statistics",

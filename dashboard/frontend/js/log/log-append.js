@@ -58,7 +58,61 @@ function appendLog({ hostname, line }) {
   row.innerHTML = `<span class="loghostname ${hostColor(hostname)}">${logHostLabel(hostname)}</span><span class="logtext">${ansiToHtml(line)}</span>`;
   box.appendChild(row);
   while (box.children.length > 800) box.removeChild(box.firstChild);
-  if (autoscroll && visible) box.scrollTop = box.scrollHeight;
+  if (autoscroll && visible) _scheduleScroll(box);
+}
+
+let _scrollRaf = 0;
+function _scheduleScroll(box) {
+  if (_scrollRaf) return;
+  _scrollRaf = requestAnimationFrame(() => {
+    _scrollRaf = 0;
+    box.scrollTop = box.scrollHeight;
+  });
+}
+
+function appendLogBatch(entries) {
+  if (!entries || !entries.length) return;
+  const box = $('logbox');
+  const frag = document.createDocumentFragment();
+  let anyVisible = false;
+
+  for (const { hostname, line } of entries) {
+    // Run all the non-DOM side effects first (metrics parse, event parse, etc.)
+    persistLog({ hostname, line });
+    const smolM = line.match(/\[SMOL_METRICS\]\s*(\{.+\})/);
+    if (smolM) {
+      try {
+        const m = JSON.parse(smolM[1]);
+        for (const [k, v] of Object.entries(m))
+          if (v !== null && v !== undefined) trainingFallbackMetrics[k] = v;
+        trainingFallbackMetrics.algorithm ||= _activeAlgo || $('algo-sel').value;
+        _scheduleRenderMetrics();
+      } catch(e) {}
+    }
+    _parseSmolEvent(line);
+    _parseTrainingLogLine(line);
+
+    if (!knownLogHosts.has(hostname)) knownLogHosts.add(hostname);
+    ensureLogFilterOption(hostname);
+
+    const visible = logFilterHost === 'all' || logFilterHost === hostname;
+    if (visible) anyVisible = true;
+
+    const row = document.createElement('div');
+    row.className = 'logline';
+    row.dataset.host = hostname;
+    if (!visible) row.style.display = 'none';
+    row.innerHTML = `<span class="loghostname ${hostColor(hostname)}">${logHostLabel(hostname)}</span><span class="logtext">${ansiToHtml(line)}</span>`;
+    frag.appendChild(row);
+  }
+
+  box.appendChild(frag);
+
+  // Trim to cap in one pass after bulk insert
+  const MAX = 800;
+  while (box.children.length > MAX) box.removeChild(box.firstChild);
+
+  if (autoscroll && anyVisible) _scheduleScroll(box);
 }
 
 function applyLogFilter() {

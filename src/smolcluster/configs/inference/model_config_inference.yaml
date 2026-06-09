@@ -28,7 +28,8 @@ mp:
         k: 40
 
 dp:
-  hf_model_name: mlx-community/Qwen2.5-0.5B-Instruct-bf16
+  hf_model_name: /Users/yuvrajsingh1/smolcluster/src/smolcluster/applications/sft/gsm8k/checkpoints/sft-think/final_model
+  # hf_model_name: mlx-community/Qwen2.5-0.5B-Instruct-bf16
 
   # Max tokens to generate per inference request.
   max_new_tokens: 256

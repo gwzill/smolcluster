@@ -107,7 +107,7 @@ class MasterWeightAdamW:
     def __init__(
         self,
         model: Any,
-        learning_rate: float,
+        learning_rate,  # float or callable schedule (step: int) -> float
         betas: tuple[float, float] = (0.9, 0.99),
         eps: float = 1e-8,
         weight_decay: float = 1e-1,
@@ -120,7 +120,8 @@ class MasterWeightAdamW:
             eps=eps,
             weight_decay=weight_decay,
         )
-        self._lr = float(learning_rate)
+        self._lr_schedule = learning_rate if callable(learning_rate) else None
+        self._lr = float(learning_rate(0)) if callable(learning_rate) else float(learning_rate)
         self._beta1 = float(betas[0])
         self._beta2 = float(betas[1])
         self._eps = float(eps)
@@ -168,6 +169,8 @@ class MasterWeightAdamW:
             return
 
         self._step += 1
+        if self._lr_schedule is not None:
+            self._lr = float(self._lr_schedule(self._step - 1))
         step = float(self._step)
         b1_correction = 1.0 - (self._beta1**step)
         b2_correction = 1.0 - (self._beta2**step)

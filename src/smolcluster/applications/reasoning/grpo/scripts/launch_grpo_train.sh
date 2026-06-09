@@ -35,14 +35,13 @@ if [[ -f "$PROJECT_DIR/.env" ]]; then
     set -u
 fi
 
-GRPO_CONFIG="$PROJECT_DIR/src/smolcluster/configs/reasoning/grpo/config.yaml"
 CLUSTER_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/cluster_config_inference.yaml"
 MODEL_CONFIG="$PROJECT_DIR/src/smolcluster/configs/inference/model_config_inference.yaml"
 VLLM_TMUX_SESSION="vllm_worker"
 
 DRY_RUN=false
 CLEANUP_ONLY=false
-TRAIN_TARGET="summarization"  # default target
+TRAIN_TARGET="gsm8k"  # default target — change to "summarization" for summarization training
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,6 +72,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Select config based on training target.
+case "$TRAIN_TARGET" in
+    gsm8k)         GRPO_CONFIG="$PROJECT_DIR/src/smolcluster/configs/reasoning/grpo/config_gsm8k.yaml" ;;
+    summarization) GRPO_CONFIG="$PROJECT_DIR/src/smolcluster/configs/reasoning/grpo/config_summarization.yaml" ;;
+esac
 
 # PID file for background SSH log-tail processes (one per vLLM worker).
 # Written during launch; read by --cleanup to stop the tails.
@@ -341,29 +346,39 @@ if [[ "$DRY_RUN" == "false" ]]; then
         fi
     done
 
-    # 2. Kill any stale vLLM instances + confirm they are down
-    reset_all_vllm_workers
+    if [[ -d "$HF_MODEL_NAME" ]]; then
+        # Local model directory: Python training will sync weights to workers and
+        # start vLLM via the weight_sync mechanism before the first rollout.
+        # Kill any stale vLLM but skip the start/health steps here.
+        echo ""
+        echo "Local model directory detected: $HF_MODEL_NAME"
+        echo "Killing stale vLLM instances (Python will sync model and restart vLLM) ..."
+        reset_all_vllm_workers
+    else
+        # 2. Kill any stale vLLM instances + confirm they are down
+        reset_all_vllm_workers
 
-    # 3. Start fresh vLLM on all workers (all fire concurrently, then we poll each)
-    echo ""
-    echo "Starting vLLM on all workers ..."
-    for i in "${!WORKER_HOSTS[@]}"; do
-        start_vllm_on_worker "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" "${WORKER_RANKS[$i]}" "$HF_MODEL_NAME"
-    done
+        # 3. Start fresh vLLM on all workers (all fire concurrently, then we poll each)
+        echo ""
+        echo "Starting vLLM on all workers ..."
+        for i in "${!WORKER_HOSTS[@]}"; do
+            start_vllm_on_worker "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" "${WORKER_RANKS[$i]}" "$HF_MODEL_NAME"
+        done
 
-    # 4. Wait for each worker's vLLM to pass /health
-    echo ""
-    echo "Waiting for vLLM workers to become healthy ..."
-    for i in "${!WORKER_HOSTS[@]}"; do
-        wait_for_vllm_up "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" || exit 1
-    done
+        # 4. Wait for each worker's vLLM to pass /health
+        echo ""
+        echo "Waiting for vLLM workers to become healthy ..."
+        for i in "${!WORKER_HOSTS[@]}"; do
+            wait_for_vllm_up "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" || exit 1
+        done
 
-    # 5. Confirm with a real completion request ("hello") on each worker
-    echo ""
-    echo "Confirming vLLM completions ..."
-    for i in "${!WORKER_HOSTS[@]}"; do
-        confirm_vllm_completion "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" || exit 1
-    done
+        # 5. Confirm with a real completion request ("hello") on each worker
+        echo ""
+        echo "Confirming vLLM completions ..."
+        for i in "${!WORKER_HOSTS[@]}"; do
+            confirm_vllm_completion "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}" "$VLLM_PORT" || exit 1
+        done
+    fi
 
 else
     echo "Dry run: skipping SSH checks, vLLM reset, and endpoint health checks."
@@ -413,6 +428,7 @@ elif [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
     HF_ENV_SETUP="export HUGGING_FACE_HUB_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; export HF_TOKEN=\"${HUGGING_FACE_HUB_TOKEN}\"; "
 fi
 HF_ENV_SETUP+="export HF_HUB_ENABLE_HF_TRANSFER=1; "
+HF_ENV_SETUP+="export GRPO_TRAIN_TARGET=\"${TRAIN_TARGET}\"; "
 
 TRAIN_CMD="cd \"$PROJECT_DIR\" && ${HF_ENV_SETUP}uv run --extra mlx python \"$TRAIN_SCRIPT\""
 

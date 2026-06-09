@@ -25,7 +25,7 @@ function uiSave(patch) {
 
 function persistLog(entry) {
   logBuffer.push(entry);
-  if (logBuffer.length > 600) logBuffer.splice(0, logBuffer.length - 600);
+  if (logBuffer.length > 200) logBuffer.splice(0, logBuffer.length - 200);
   if (_replayingLogs) return;
   // Debounce: flush at most once every 2 s instead of on every line.
   // During active training batches of 200 lines arrive at once — without
@@ -65,11 +65,11 @@ async function loadUI() {
   if (s.track) activeSetupTrack = s.track;
   if (s.step != null) activeSetupStep = Number(s.step);
 
-  // Replay persisted logs into the DOM
+  // Replay persisted logs into the DOM (batch to avoid per-line reflows)
   if (Array.isArray(s.logs) && s.logs.length) {
     logBuffer = s.logs;
     _replayingLogs = true;
-    s.logs.forEach(e => appendLog(e));
+    appendLogBatch(s.logs);
     _replayingLogs = false;
   }
 

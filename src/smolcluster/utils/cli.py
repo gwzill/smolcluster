@@ -4,7 +4,6 @@ import argparse
 import os
 import sys
 
-import grove
 from dashboard.__main__ import main as dashboard_main
 
 ALGORITHMS = ["edp", "syncps", "mp", "mp_pipeline", "classicdp", "fsdp", "ep"]
@@ -43,6 +42,10 @@ def build_discover_parser(default_algorithm: str) -> argparse.ArgumentParser:
 
 
 def grove_world_size() -> int:
+    try:
+        import grove
+    except ImportError:
+        return int(os.environ.get("SMOLCLUSTER_WORLD_SIZE", "2"))
     return grove.world_size if grove.world_size > 1 else int(os.environ.get("SMOLCLUSTER_WORLD_SIZE", "2"))
 
 
@@ -52,6 +55,10 @@ def run_dashboard() -> None:
 
 
 def should_autodiscover(argv: list[str]) -> bool:
+    try:
+        import grove
+    except ImportError:
+        return False
     return grove.world_size > 1 and (len(argv) < 2 or argv[1] not in MODES)
 
 

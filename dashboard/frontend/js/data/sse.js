@@ -84,7 +84,7 @@ function startLogs() {
   logsEventSource = new EventSource('/api/logs');
   logsEventSource.onmessage = e => {
     const linesData = JSON.parse(e.data);
-    linesData.forEach(appendLog);
+    appendLogBatch(linesData);
   };
   logsEventSource.onerror = () => { logsEventSource.close(); logsEventSource = null; setTimeout(startLogs, 3000); };
 }

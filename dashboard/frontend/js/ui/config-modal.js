@@ -1,40 +1,91 @@
 // Config side panel — opens on Train, loads the algo's config file
-let _cfgRawMode = false;
-let _cfgAllRows = [];
+let _cfgRawMode  = false;
+let _cfgAllRows  = [];
+let _cfgTab      = 'algo';   // 'algo' | 'cluster' | 'model'
+let _cfgAlgo     = '';
+let _cfgInfCache = null;     // cached { cluster, model } fetch result
 
 async function showConfig(algo) {
-  const overlay = document.getElementById('cfg-overlay');
-  const kvBody  = document.getElementById('cfg-kv-body');
-  const rawBody = document.getElementById('cfg-raw-body');
-  const title   = document.getElementById('cfg-title');
-  const count   = document.getElementById('cfg-key-count');
+  _cfgAlgo     = algo;
+  _cfgInfCache = null;
+  _cfgTab      = 'algo';
+  _setActiveTab('algo');
 
-  _cfgRawMode = false;
-  document.getElementById('cfg-raw-btn').textContent = 'View raw data';
-  kvBody.style.display  = '';
-  rawBody.style.display = 'none';
-  document.getElementById('cfg-search').value = '';
-  kvBody.innerHTML = '<div class="cfg-loading">Loading…</div>';
-  count.textContent = '';
-  title.textContent = `Config · ${algo.toUpperCase()}`;
+  const overlay = document.getElementById('cfg-overlay');
   overlay.classList.add('visible');
 
+  _resetCfgUI(`Config · ${algo.toUpperCase()}`);
+  await _loadAlgoTab(algo);
+}
+
+async function switchCfgTab(tab) {
+  if (_cfgTab === tab) return;
+  _cfgTab = tab;
+  _setActiveTab(tab);
+
+  if (tab === 'algo') {
+    _resetCfgUI(`Config · ${_cfgAlgo.toUpperCase()}`);
+    await _loadAlgoTab(_cfgAlgo);
+    return;
+  }
+
+  // cluster or model — fetch once and cache
+  _resetCfgUI(tab === 'cluster' ? 'cluster_config_inference.yaml' : 'model_config_inference.yaml');
+  document.getElementById('cfg-kv-body').innerHTML = '<div class="cfg-loading">Loading…</div>';
+
+  try {
+    if (!_cfgInfCache) {
+      const r = await fetch('/api/config/inference');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      _cfgInfCache = await r.json();
+    }
+    const entry = _cfgInfCache[tab];
+    _applyYaml(entry.yaml, entry.filename);
+  } catch (e) {
+    document.getElementById('cfg-kv-body').innerHTML = `<div class="cfg-loading cfg-err">Error: ${e.message}</div>`;
+  }
+}
+
+function _setActiveTab(tab) {
+  ['algo', 'cluster', 'model'].forEach(t => {
+    document.getElementById(`cfg-tab-${t}`)?.classList.toggle('active', t === tab);
+  });
+}
+
+function _resetCfgUI(titleText) {
+  _cfgRawMode = false;
+  _cfgAllRows = [];
+  document.getElementById('cfg-raw-btn').textContent    = 'View raw data';
+  document.getElementById('cfg-kv-body').style.display  = '';
+  document.getElementById('cfg-raw-body').style.display = 'none';
+  document.getElementById('cfg-raw-body').textContent   = '';
+  document.getElementById('cfg-search').value           = '';
+  document.getElementById('cfg-key-count').textContent  = '';
+  document.getElementById('cfg-title').textContent      = titleText;
+}
+
+async function _loadAlgoTab(algo) {
+  document.getElementById('cfg-kv-body').innerHTML = '<div class="cfg-loading">Loading…</div>';
   try {
     const r = await fetch(`/api/config?algorithm=${encodeURIComponent(algo)}`);
     if (!r.ok) {
       const err = await r.json().catch(() => ({ detail: 'Unknown error' }));
-      kvBody.innerHTML = `<div class="cfg-loading cfg-err">Error: ${err.detail}</div>`;
+      document.getElementById('cfg-kv-body').innerHTML = `<div class="cfg-loading cfg-err">Error: ${err.detail}</div>`;
       return;
     }
     const data = await r.json();
-    rawBody.textContent = data.yaml;
-    _cfgAllRows = parseYaml(data.yaml);
-    const topLevel = _cfgAllRows.filter(r => r.depth === 0);
-    count.textContent = `{} ${topLevel.length} keys`;
-    renderCfgRows(_cfgAllRows);
+    _applyYaml(data.yaml, data.filename);
   } catch (e) {
-    kvBody.innerHTML = `<div class="cfg-loading cfg-err">Error: ${e.message}</div>`;
+    document.getElementById('cfg-kv-body').innerHTML = `<div class="cfg-loading cfg-err">Error: ${e.message}</div>`;
   }
+}
+
+function _applyYaml(yaml, filename) {
+  document.getElementById('cfg-raw-body').textContent = yaml;
+  _cfgAllRows = parseYaml(yaml);
+  const topLevel = _cfgAllRows.filter(r => r.depth === 0);
+  document.getElementById('cfg-key-count').textContent = `{} ${topLevel.length} keys`;
+  renderCfgRows(_cfgAllRows);
 }
 
 function hideConfig() {

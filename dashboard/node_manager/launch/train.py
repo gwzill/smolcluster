@@ -125,6 +125,7 @@ class _TrainLaunchMixin:
             stderr=asyncio.subprocess.STDOUT,
             env=env,
             cwd=str(Path(scripts_dir).parent.parent),
+            start_new_session=True,
         )
         async with self._lock:
             self.processes[server_hostname] = {

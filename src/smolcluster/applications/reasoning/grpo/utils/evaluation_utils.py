@@ -7,9 +7,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from deepeval.metrics import GEval
-
-
 def batch_items(items: list[Any], batch_size: int) -> list[list[Any]]:
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
@@ -38,7 +35,14 @@ def resolve_path(path: str, project_root: Path) -> Path:
 def build_geval_metrics(
     judge_model: str,
     metric_specs: list[dict[str, Any]],
-) -> list[GEval]:
+) -> list:
+    try:
+        from deepeval.metrics import GEval
+    except ImportError as e:
+        raise ImportError(
+            "deepeval is required for summarization evaluation. "
+            "Install it with: uv pip install deepeval"
+        ) from e
     return [GEval(model=judge_model, **spec) for spec in metric_specs]
 
 

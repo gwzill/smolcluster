@@ -243,14 +243,16 @@ select {
 #cfg-overlay.visible #cfg-backdrop { opacity: 1; }
 
 #cfg-panel {
-  position: absolute; right: 0; top: 0; bottom: 0;
+  position: absolute; right: 12px; top: 12px; bottom: 12px;
   width: min(460px, 92vw);
   background: var(--card);
-  border-left: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 14px;
   display: flex; flex-direction: column;
-  transform: translateX(100%);
+  overflow: hidden;
+  transform: translateX(calc(100% + 24px));
   transition: transform .22s cubic-bezier(.4,0,.2,1);
-  box-shadow: -6px 0 36px rgba(0,0,0,0.18);
+  box-shadow: -4px 0 40px rgba(0,0,0,0.18);
 }
 #cfg-overlay.visible #cfg-panel { transform: translateX(0); }
 
@@ -262,13 +264,32 @@ select {
 #cfg-title-wrap {
   display: flex; align-items: center; gap: 8px; min-width: 0;
 }
-#cfg-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+#cfg-title {
+  font-size: 16px; font-weight: 700; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
 #cfg-key-count {
   font-size: 11px; color: var(--ink-3); font-family: 'IBM Plex Mono', monospace;
   background: var(--bg-0); padding: 2px 7px; border-radius: 5px;
   border: 1px solid var(--line); flex-shrink: 0;
 }
 #cfg-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+#cfg-tabs {
+  display: flex; gap: 0; padding: 0 10px; flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-0);
+}
+.cfg-tab {
+  font-size: 11px; font-weight: 600; color: var(--ink-3);
+  background: none; border: none; border-bottom: 2px solid transparent;
+  cursor: pointer; padding: 7px 12px 6px; letter-spacing: .03em;
+  transition: color .12s, border-color .12s;
+}
+.cfg-tab:hover { color: var(--ink); }
+.cfg-tab.active { color: var(--teal); border-bottom-color: var(--teal); }
+
 #cfg-raw-btn {
   font-size: 11px; font-weight: 600; color: var(--teal);
   background: none; border: none; cursor: pointer; padding: 2px 0;

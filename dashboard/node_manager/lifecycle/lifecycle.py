@@ -28,6 +28,7 @@ class _LifecycleMixin:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
+            start_new_session=True,
         )
         async with self._lock:
             self.processes[server_hostname] = {

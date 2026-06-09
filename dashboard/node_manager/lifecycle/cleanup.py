@@ -10,7 +10,7 @@ from ..ssh import _build_ssh_target
 logger = logging.getLogger(__name__)
 
 _TMUX_PATTERN = (
-    "^(server|worker[0-9]*"
+    "^(worker[0-9]*"
     "|classicdp_worker[0-9]*|fsdp_worker[0-9]*|ep_worker[0-9]*|mp_pipeline_worker[0-9]*"
     "|syncps_inf_.*|classicdp_inf_.*|mp_inference_.*|mp_tablet_proxy[0-9]*"
     "|grpo_train|vllm_worker"
@@ -58,6 +58,7 @@ class _CleanupMixin:
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
                 cwd=str(Path(script_path).parent.parent.parent),
+                start_new_session=True,
             )
             while True:
                 raw = await proc.stdout.readline()

@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,7 +21,8 @@ debug_lock = threading.Lock()
 # Resolve config paths relative to project root
 _module_dir = Path(__file__).parent
 _smolcluster_root = _module_dir.parents[3]  # Navigate from utils -> grpo -> reasoning -> applications -> smolcluster
-_config_path = _smolcluster_root / "configs" / "reasoning" / "grpo" / "config.yaml"
+_train_target = os.environ.get("GRPO_TRAIN_TARGET", "gsm8k")
+_config_path = _smolcluster_root / "configs" / "reasoning" / "grpo" / f"config_{_train_target}.yaml"
 _cluster_config_path = _smolcluster_root / "configs" / "inference" / "cluster_config_inference.yaml"
 _project_root = _smolcluster_root.parent.parent
 _debug_dir = _project_root / ".grpo_debug"
@@ -122,6 +124,17 @@ def _fetch_n_from_worker(
 
         if non_empty:
             emit_smol_event("rollout", "in", "grpo")
+            model_served = result.get("model", "")
+            expected_model = api_params.get("model", "")
+            if expected_model == "adapter":
+                if model_served == "adapter":
+                    logger.info("[vllm worker %d] LoRA adapter confirmed in use (model=%r)", worker_rank, model_served)
+                else:
+                    logger.warning(
+                        "[vllm worker %d] LoRA mismatch: requested model=%r but served model=%r — "
+                        "adapter may not be loaded yet",
+                        worker_rank, expected_model, model_served,
+                    )
             logger.info("[vllm worker %d] Got %d/%d non-empty completion(s)", worker_rank, len(non_empty), n)
             for idx, text in enumerate(non_empty):
                 logger.info(
@@ -195,6 +208,96 @@ def generate_rollouts_vllm(
     total = sum(len(items) for items in rollouts.values())
     logger.info("[generate_rollouts_vllm] All workers done. %d non-empty rollout(s) collected", total)
     return rollouts
+
+
+# ---------------------------------------------------------------------------
+# vLLM TTFT metrics — query /metrics endpoint, return p50 TTFT in ms
+# ---------------------------------------------------------------------------
+
+def _p50_from_prometheus_histogram(text: str, metric_name: str) -> float | None:
+    """Parse a Prometheus-format cumulative histogram and return the p50 value."""
+    bucket_re = re.compile(
+        rf'^{re.escape(metric_name)}_bucket\{{[^}}]*\ble="([^"]+)"[^}}]*\}}\s+([\d.eE+\-]+)',
+        re.MULTILINE,
+    )
+    count_re = re.compile(
+        rf'^{re.escape(metric_name)}_count(?:\{{[^}}]*\}})?\s+([\d.eE+\-]+)',
+        re.MULTILINE,
+    )
+    buckets: list[tuple[float, float]] = []
+    for m in bucket_re.finditer(text):
+        le_str, val_str = m.group(1), m.group(2)
+        if le_str == "+Inf":
+            continue
+        try:
+            buckets.append((float(le_str), float(val_str)))
+        except ValueError:
+            continue
+    cm = count_re.search(text)
+    if not cm or not buckets:
+        return None
+    total = float(cm.group(1))
+    if total < 1:
+        return None
+    target = total * 0.5
+    buckets.sort(key=lambda x: x[0])
+    prev_le, prev_count = 0.0, 0.0
+    for le, count in buckets:
+        if count >= target:
+            if count <= prev_count or le <= prev_le:
+                return le
+            frac = (target - prev_count) / (count - prev_count)
+            return prev_le + frac * (le - prev_le)
+        prev_le, prev_count = le, count
+    return buckets[-1][0] if buckets else None
+
+
+def _median(values: list[float]) -> float:
+    values = sorted(values)
+    n = len(values)
+    return (values[n // 2 - 1] + values[n // 2]) / 2 if n % 2 == 0 else values[n // 2]
+
+
+def fetch_vllm_perf_metrics(worker_urls: dict[int, str]) -> dict[str, float]:
+    """Query vLLM /metrics once per worker, return median p50 TTFT and TPOT in ms.
+
+    Uses vllm:time_to_first_token_seconds for tok/sec in (prefill throughput)
+    and vllm:inter_token_latency_seconds for tok/sec out (decode throughput).
+    Per-worker p50 is interpolated from cumulative histogram buckets; the
+    median across all workers is returned so a single slow worker doesn't skew
+    the display — and this naturally scales to any number of vLLM workers.
+
+    Returns: {"ttft_p50_ms": float, "tpot_p50_ms": float}  (keys absent if unavailable)
+    """
+    ttfts_s: list[float] = []
+    tpots_s: list[float] = []
+
+    for rank, completion_url in worker_urls.items():
+        metrics_url = completion_url.split("/v1/")[0] + "/metrics"
+        try:
+            r = requests.get(metrics_url, timeout=3)
+            r.raise_for_status()
+            text = r.text
+
+            ttft = _p50_from_prometheus_histogram(text, "vllm:time_to_first_token_seconds")
+            if ttft is not None and ttft > 0:
+                ttfts_s.append(ttft)
+                logger.debug("[vllm_metrics] worker %d TTFT p50 = %.1f ms", rank, ttft * 1000)
+
+            tpot = _p50_from_prometheus_histogram(text, "vllm:inter_token_latency_seconds")
+            if tpot is not None and tpot > 0:
+                tpots_s.append(tpot)
+                logger.debug("[vllm_metrics] worker %d TPOT p50 = %.1f ms  (%.1f tok/s)", rank, tpot * 1000, 1 / tpot)
+
+        except Exception as exc:
+            logger.debug("[vllm_metrics] worker %d metrics unavailable: %s", rank, exc)
+
+    result: dict[str, float] = {}
+    if ttfts_s:
+        result["ttft_p50_ms"] = round(_median(ttfts_s) * 1000, 2)
+    if tpots_s:
+        result["tpot_p50_ms"] = round(_median(tpots_s) * 1000, 2)
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Sequence
@@ -13,6 +14,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import yaml
+from mlx.utils import tree_flatten
 from tqdm.auto import tqdm
 
 import wandb
@@ -30,6 +32,8 @@ from smolcluster.applications.reasoning.grpo.utils import (
     apply_lora_if_quantized,
     build_completion_mask,
     build_rollouts_per_prompt,
+    build_vllm_worker_urls,
+    fetch_vllm_perf_metrics,
     compute_advantages,
     compute_grpo_loss,
     compute_logprobs,
@@ -49,16 +53,16 @@ from smolcluster.applications.reasoning.grpo.utils import (
 from smolcluster.utils import emit_smol_event, setup_logging
 
 try:
-    import grove as _grove
+    import grove
 except ImportError:
-    _grove = None
+    grove = None
 
 logger = logging.getLogger(__name__)
 
 
 _module_dir = Path(__file__).parent
 _smolcluster_root = _module_dir.parents[2]
-grpo_config_path = _smolcluster_root / "configs" / "reasoning" / "grpo" / "config.yaml"
+grpo_config_path = _smolcluster_root / "configs" / "reasoning" / "grpo" / "config_gsm8k.yaml"
 model_config_path = _smolcluster_root / "configs" / "inference" / "model_config_inference.yaml"
 
 with open(grpo_config_path) as f:
@@ -115,14 +119,25 @@ def evaluate_batch(
     attention_mask = flat_mask.reshape(T, C, D)
     completion_mask = build_completion_mask(tokenizer, rollout_questions, flat_mask, T, C).reshape(T, C, D)
 
+    use_ckpt = config.get("grad_checkpoint", False)
+
     model.eval()
-    old_logprobs = compute_logprobs(model, input_ids, attention_mask, dtype=dtype, completion_mask=completion_mask)  # [T, C]
-    mx.eval(old_logprobs)
+    curr_logprobs = compute_logprobs(
+        model, input_ids, attention_mask,
+        dtype=dtype, completion_mask=completion_mask, use_checkpoint=use_ckpt,
+    )  # [T, C]
+
+    ref_logprobs: mx.array | None = None
+    if ref_model is not None and config.get("use_kl", True):
+        ref_logprobs = compute_logprobs(
+            ref_model, input_ids, attention_mask,
+            dtype=dtype, completion_mask=completion_mask, use_checkpoint=use_ckpt,
+        )  # [T, C]
+
+    mx.eval(curr_logprobs)
     model.train()
 
-    curr_logprobs = compute_logprobs(model, input_ids, attention_mask, dtype=dtype, completion_mask=completion_mask)  # [T, C]
-
-    rewards_flat, reward_components = compute_math_rewards(
+    rewards_flat, _reward_components = compute_math_rewards(
         rollout_texts,
         rollout_targets,
         dtype=dtype,
@@ -135,13 +150,11 @@ def evaluate_batch(
     rewards = rewards_flat.reshape(T, C)          # [T, C]
     advantages = compute_advantages(rewards, dtype=dtype)  # [T, C]
 
-    ref_logprobs: mx.array | None = None
-    if ref_model is not None and config.get("use_kl", True):
-        ref_logprobs = compute_logprobs(ref_model, input_ids, attention_mask, dtype=dtype, completion_mask=completion_mask)  # [T, C]
-
+    # Pass curr_logprobs as old_logprobs — no policy update so the ratio is always 1.
+    # This gives a valid loss reading (clipping has no effect) without an extra forward pass.
     loss = compute_grpo_loss(
         curr_logprobs, advantages, config,
-        old_logprobs=old_logprobs, ref_logprobs=ref_logprobs,
+        old_logprobs=curr_logprobs, ref_logprobs=ref_logprobs,
     )
     mx.eval(loss, rewards)
 
@@ -283,7 +296,7 @@ def train_step(
 
     accum_grads = None
     total_loss = 0.0
-    _t_grad = time.time()
+    t_grad = time.time()
 
     # Store curr_logprobs for ratio diagnostics (avoid recomputing after grad loop)
     curr_lps: list[mx.array] = []
@@ -334,11 +347,16 @@ def train_step(
                 with mx.stream(device_stream):
                     mx.eval(accum_grads)
 
-    logger.info("%s Loss: %.6f  [TIMING] grad_loop: %.1fs", step_tag, total_loss, time.time() - _t_grad)
+    logger.info("%s Loss: %.6f  [TIMING] grad_loop: %.1fs", step_tag, total_loss, time.time() - t_grad)
 
     # ---- extra diagnostics (no grad needed) --------------------------------
     # completion_mask is [T, C, D]; sum over token dim → per-rollout completion lengths [T, C]
     lengths = mx.sum(completion_mask, axis=-1).astype(dtype)
+    # prompt length = total attended tokens minus completion tokens (per rollout)
+    prompt_lengths = (
+        mx.sum(flat_mask, axis=-1).astype(dtype)
+        - mx.sum(completion_mask.reshape(T * C, D), axis=-1).astype(dtype)
+    )
     ar = mx.array(reward_components["answer_reward"]) if reward_components else None
     fr = mx.array(reward_components["formatted_reward"]) if reward_components else None
     metrics_extra: dict[str, float] = {
@@ -350,6 +368,7 @@ def train_step(
         "generation_token_len_mean": float(mx.mean(lengths).item()),
         "generation_token_len_min": float(mx.min(lengths).item()),
         "generation_token_len_max":  float(mx.max(lengths).item()),
+        "prompt_token_len_mean": float(mx.mean(prompt_lengths).item()),
         "answer_reward_mean": float(mx.mean(ar).item()),
         "answer_reward_std":  float(mx.std(ar).item()),
         "answer_reward_min":  float(mx.min(ar).item()),
@@ -442,6 +461,7 @@ def train(
     dtype: type = mx.float32,
     device: mx.Device = mx.cpu,
     scaler: GradScaler | None = None,
+    model_cfg: dict[str, Any] | None = None,
 ) -> None:
     global _LAST_DASHBOARD_GRAD_TS
     model.train()
@@ -501,8 +521,8 @@ def train(
             current_rollout_step = rollout_step + 1
             rollout_step = current_rollout_step
             # Collect prefetched rollouts (blocks only on cold-start or very fast compute)
-            _pfetch = prefetcher.get() if prefetcher else None
-            pre, _prefetch_time_s = _pfetch if _pfetch is not None else (None, None)
+            pfetch = prefetcher.get() if prefetcher else None
+            pre, prefetch_time_s = pfetch if pfetch is not None else (None, None)
             if pre is not None:
                 emit_smol_event("rollout", "in", "grpo", count=int(config["num_rollouts"]))
             # Immediately arm next step — runs concurrently with all compute below
@@ -605,6 +625,12 @@ def train(
                 found_inf = scaler.has_inf_nan(step_grads)
 
             skipped_update = False
+            per_param_norms: dict[str, float] = {}
+            if config.get("log_param_grad_norms", False) and not found_inf:
+                for name, g in tree_flatten(step_grads):
+                    if g is not None:
+                        per_param_norms[f"grad_norms/{name}"] = float(mx.sqrt(mx.sum(g * g)).item())
+
             if found_inf:
                 skipped_update = True
                 grad_norm = float("nan")
@@ -625,8 +651,17 @@ def train(
                 for k in accum_metrics[0]
                 if not isinstance(accum_metrics[0][k], dict)
             }
-            if _prefetch_time_s is not None and pre is not None:
-                metrics["rollout_time_s"] = _prefetch_time_s
+            if prefetch_time_s is not None and pre is not None:
+                metrics["rollout_time_s"] = prefetch_time_s
+
+            # TTFT + TPOT p50 (median across workers) from vLLM /metrics Prometheus endpoint.
+            # Single GET /metrics per worker; both histograms parsed in one pass.
+            if config.get("vllm", False):
+                try:
+                    vllm_perf = fetch_vllm_perf_metrics(build_vllm_worker_urls(grpo_config))
+                    metrics.update(vllm_perf)
+                except Exception:
+                    pass
             # -------------------------------------------------------
 
             # Save checkpoint weights at a configurable interval.
@@ -645,8 +680,7 @@ def train(
             if should_save_checkpoint or should_sync_workers:
                 logger.info("[checkpoint] Step %d — saving policy weights ...", global_step)
                 try:
-                    # Periodic saves overwrite a stable "latest" checkpoint.
-                    weights_dir = save_policy_weights(model, checkpoint_dir, "latest", tokenizer=tokenizer, model_cfg=model_cfg)
+                    weights_dir = save_policy_weights(model, checkpoint_dir, global_step, tokenizer=tokenizer, model_cfg=model_cfg)
 
                     # Periodically reload vLLM workers so rollouts always come
                     # from the most recent policy.
@@ -654,6 +688,9 @@ def train(
                         logger.info("[weight_sync] Step %d — syncing workers ...", global_step)
                         sync_and_reload_workers(weights_dir, config, model_config)
                         logger.info("[weight_sync] Step %d — workers reloaded.", global_step)
+                        # LoRA adapters are merged into the base weights before sync
+                        # (vllm-metal does not support --enable-lora, issue #326).
+                        # Workers serve the merged full model — no model= override needed.
                         # Discard stale prefetched rollouts (generated by old weights) and re-arm
                         if prefetcher and next_idx < total_steps_in_epoch:
                             prefetcher.flush()
@@ -671,8 +708,8 @@ def train(
                             global_step, sync_exc,
                         )
 
-            _elapsed = int(time.time() - train_start_time)
-            _eh, _em, _es = _elapsed // 3600, (_elapsed % 3600) // 60, _elapsed % 60
+            elapsed = int(time.time() - train_start_time)
+            eh, em, es = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
             epoch_bar.set_postfix(
                 epoch=epoch + 1,
                 step=global_step,
@@ -680,7 +717,7 @@ def train(
                 grad_norm=f"{grad_norm:.4f}",
                 amp_scale=f"{(scaler.get_scale() if scaler else 1.0):.0f}",
                 skipped=int(skipped_update),
-                elapsed=f"{_eh:02d}:{_em:02d}:{_es:02d}",
+                elapsed=f"{eh:02d}:{em:02d}:{es:02d}",
             )
             wandb.log(
                 {
@@ -710,24 +747,29 @@ def train(
                     "rollouts/num_rollouts":     metrics["num_rollouts"],
                     "train/epoch":            epoch + 1,
                     "train/step":             global_step,
+                    **per_param_norms,
                 },
                 step=global_step,
             )
             # Recv network stats: rollout completions received from vLLM workers.
-            _rollout_ms = float(metrics.get("rollout_time_s", 0)) * 1000
-            if _rollout_ms > 0:
-                _total_tokens = float(metrics.get("num_rollouts", 0)) * float(metrics.get("generation_token_len_mean", 0))
-                _recv_mb = _total_tokens * 2 / 1e6  # ~2 bytes per token
-                _last_net_stats["avg_recv_latency_ms"] = round(_rollout_ms, 1)
-                _last_net_stats["recv_bandwidth_mbps"] = round((_recv_mb * 8) / max(0.001, _rollout_ms / 1000), 3) if _recv_mb > 0 else 0.0
-                _last_net_stats["total_recv_mb"] = round(_recv_mb, 3)
-                # Send network stats: prompt requests sent to vLLM workers each step.
-                _prompt_tokens = float(metrics.get("num_rollouts", 0)) * float(metrics.get("prompt_token_len_mean", 0))
-                _send_mb = _prompt_tokens * 2 / 1e6
-                _per_req_lat_ms = round(_rollout_ms / max(1.0, float(metrics.get("num_rollouts", 1))), 1)
-                _last_net_stats["avg_send_latency_ms"] = _per_req_lat_ms  # per-request avg inference latency
-                _last_net_stats["send_bandwidth_mbps"] = round((_send_mb * 8) / max(0.001, _rollout_ms / 1000), 3) if _send_mb > 0 else 0.0
-                _last_net_stats["total_send_mb"] = round(_send_mb, 3)
+            rollout_ms = float(metrics.get("rollout_time_s", 0)) * 1000
+            if rollout_ms > 0:
+                num_rollouts = float(metrics.get("num_rollouts", 0))
+                prompt_len   = float(metrics.get("prompt_token_len_mean", 0))
+                gen_len      = float(metrics.get("generation_token_len_mean", 0))
+                # RECV: each rollout response contains prompt + completion tokens
+                total_recv_tokens = num_rollouts * (prompt_len + gen_len)
+                recv_mb = total_recv_tokens * 2 / 1e6
+                _last_net_stats["avg_recv_latency_ms"] = round(rollout_ms, 1)
+                _last_net_stats["recv_bandwidth_mbps"] = round((recv_mb * 8) / max(0.001, rollout_ms / 1000), 3) if recv_mb > 0 else 0.0
+                _last_net_stats["total_recv_mb"] = round(recv_mb, 3)
+                # SEND: each rollout request carries 1 prompt
+                prompt_tokens = num_rollouts * prompt_len
+                send_mb = prompt_tokens * 2 / 1e6
+                per_req_lat_ms = round(rollout_ms / max(1.0, num_rollouts), 1)
+                _last_net_stats["avg_send_latency_ms"] = per_req_lat_ms  # per-request avg inference latency
+                _last_net_stats["send_bandwidth_mbps"] = round((send_mb * 8) / max(0.001, rollout_ms / 1000), 3) if send_mb > 0 else 0.0
+                _last_net_stats["total_send_mb"] = round(send_mb, 3)
 
             _LAST_DASHBOARD_GRAD_TS = publish_dashboard_metrics(
                 metrics,
@@ -737,7 +779,7 @@ def train(
                 lr=get_optimizer_lr(optimizer, config),
                 skipped_update=skipped_update,
                 last_ts=_LAST_DASHBOARD_GRAD_TS,
-                grove=_grove,
+                grove=grove,
                 net_stats=dict(_last_net_stats),
             )
 
@@ -786,16 +828,57 @@ def main() -> None:
     logger.info("Using dtype: %s", dtype)
 
     model, ref_model, tokenizer, model_cfg = load_model(dtype, grpo_config, model_config)
+
+    # If hf_model_name is a local directory, sync it to vLLM workers immediately so
+    # rollouts use the correct weights from the first step. The bash launch script skips
+    # its own vLLM startup for local models and defers to this call.
+    hf_model_name = model_config["dp"]["hf_model_name"]
+    if Path(hf_model_name).is_dir():
+        logger.info("[init] Local model dir detected: %s", hf_model_name)
+        logger.info("[init] Syncing local model to vLLM workers (this may take a minute) ...")
+        sync_and_reload_workers(Path(hf_model_name), grpo_config, model_config)
+        logger.info("[init] Workers loaded with local model weights and vLLM is healthy.")
+
     train_examples, val_examples = build_train_val_examples(
         grpo_config["data"], tokenizer=tokenizer, seed=seed
     )
 
     # Save step_0 checkpoint — initial (pre-training) weights for baseline comparison
-    _ckpt_dir = str(grpo_config.get("weight_sync", {}).get("checkpoint_dir", "checkpoints/grpo"))
+    ckpt_dir = str(grpo_config.get("weight_sync", {}).get("checkpoint_dir", "checkpoints/grpo"))
     logger.info("[checkpoint] Saving initial weights as step_0 ...")
-    save_policy_weights(model, _ckpt_dir, 0, tokenizer=tokenizer, model_cfg=model_cfg)
+    save_policy_weights(model, ckpt_dir, 0, tokenizer=tokenizer, model_cfg=model_cfg)
     logger.info("[checkpoint] step_0 checkpoint saved.")
-    _lora_active = apply_lora_if_quantized(model, grpo_config)
+    lora_active = apply_lora_if_quantized(model, grpo_config)
+    # Build LR schedule: linear warmup → cosine decay (only when use_lr_scheduler: true).
+    steps_per_epoch = math.ceil(len(train_examples) / int(grpo_config["batch_size"]))
+    grad_accum = max(1, int(grpo_config.get("grad_accum_steps", 1)))
+    total_opt_steps = int(grpo_config["num_epochs"]) * (steps_per_epoch // grad_accum)
+    if grpo_config.get("use_lr_scheduler", False):
+        sched_cfg = grpo_config["lr_scheduler"]
+        max_lr = float(sched_cfg["max_lr"])
+        min_lr = float(sched_cfg["min_lr"])
+        warmup_ratio = float(sched_cfg.get("warmup_ratio", 0.0))
+        warmup_steps = int(total_opt_steps * warmup_ratio)
+        decay_steps = max(1, total_opt_steps - warmup_steps)
+        if warmup_steps > 0:
+            lr_schedule = optim.join_schedules(
+                [
+                    optim.linear_schedule(init=min_lr, end=max_lr, steps=warmup_steps),
+                    optim.cosine_decay(init=max_lr, decay_steps=decay_steps, end=min_lr),
+                ],
+                [warmup_steps + 1],
+            )
+            logger.info(
+                "LR schedule: warmup %d steps (%.2e→%.2e) + cosine decay %d steps (→%.2e)",
+                warmup_steps, min_lr, max_lr, decay_steps, min_lr,
+            )
+        else:
+            lr_schedule = optim.cosine_decay(init=max_lr, decay_steps=decay_steps, end=min_lr)
+            logger.info("LR schedule: cosine decay %d steps (%.2e→%.2e)", decay_steps, max_lr, min_lr)
+    else:
+        lr_schedule = float(grpo_config["learning_rate"])
+        logger.info("LR schedule: flat %.2e (use_lr_scheduler: false)", lr_schedule)
+
     optimizer_name = grpo_config.get("optimizer", "adam").lower()
     amp_enabled = bool(grpo_config.get("amp", False))
     if optimizer_name == "sgd":
@@ -803,27 +886,27 @@ def main() -> None:
             logger.warning("AMP is not supported with SGD — disabling AMP")
             amp_enabled = False
         scaler = GradScaler(enabled=False)
-        optimizer = optim.SGD(learning_rate=float(grpo_config["learning_rate"]))
-        logger.info("Optimizer: SGD (lr=%.6f)", float(grpo_config["learning_rate"]))
+        optimizer = optim.SGD(learning_rate=lr_schedule)
+        logger.info("Optimizer: SGD (max_lr=%.6f)", max_lr)
     else:
         scaler = GradScaler(
             init_scale=float(grpo_config.get("amp_init_scale", 2 ** 15)),
             growth_interval=int(grpo_config.get("amp_growth_interval", 2000)),
             enabled=amp_enabled,
         )
-        master_weights_enabled = _lora_active and bool(grpo_config.get("amp_master_weights", amp_enabled))
+        master_weights_enabled = lora_active and bool(grpo_config.get("amp_master_weights", amp_enabled))
         optimizer = MasterWeightAdamW(
             model=model,
-            learning_rate=float(grpo_config["learning_rate"]),
+            learning_rate=lr_schedule,
             enabled=master_weights_enabled,
         )
         logger.info(
-            "Optimizer: AdamW (lr=%.6f, amp=%s, master_weights=%s)",
-            float(grpo_config["learning_rate"]), amp_enabled, master_weights_enabled,
+            "Optimizer: AdamW (max_lr=%.6f, amp=%s, master_weights=%s)",
+            max_lr, amp_enabled, master_weights_enabled,
         )
 
     wandb.init(
-        project=grpo_config.get("wandb_project", "smolcluster-grpo"),
+        project=grpo_config.get("wandb", {}).get("project", "smolcluster-grpo"),
         config={
             **grpo_config,
             "seed": seed,
@@ -844,8 +927,22 @@ def main() -> None:
             dtype=dtype,
             device=device,
             scaler=scaler,
+            model_cfg=model_cfg,
         )
-    finally:
+    except Exception as _fatal:
+        logger.critical("=" * 72)
+        logger.critical("TRAINING CRASHED: %s", _fatal)
+        logger.critical("=" * 72, exc_info=True)
+        try:
+            wandb.finish(exit_code=1)
+            
+        except Exception:
+            pass
+        
+        import os
+        os._exit(1)
+        
+    else:
         wandb.finish()
 
 

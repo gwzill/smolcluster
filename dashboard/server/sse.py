@@ -38,7 +38,7 @@ async def sse_logs(request: Request):
     async def gen():
         # Send recent history first so the UI doesn't miss logs from before connect.
         try:
-            history = await ctx.redis.xrevrange("smolcluster:logs", "+", "-", count=500)
+            history = await ctx.redis.xrevrange("smolcluster:logs", "+", "-", count=100)
             if history:
                 history.reverse()
                 lines = [
